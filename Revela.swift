@@ -52,6 +52,15 @@ struct GradeWheel: Codable, Equatable, Hashable {
     var lum: Double = 0
 }
 
+/// Punto de color: un color concreto elegido con el cuentagotas y cómo se transforma.
+struct PointColor: Codable, Equatable, Hashable, Identifiable {
+    var id = UUID()
+    var color: [Double] = [0.5, 0.5, 0.5]   // sRGB 0…1, muestreado justo antes de la LUT
+    var hue = 0.0, sat = 0.0, lum = 0.0     // desplazamientos −100…100
+    var variance = 0.0                      // −100 unifica los tonos del rango, +100 los separa
+    var range = 50.0                        // 0…100
+}
+
 enum Profile: String, Codable, CaseIterable, Identifiable {
     case color = "Color", vivid = "Vívido", neutral = "Neutro", landscape = "Paisaje", portrait = "Retrato", mono = "Monocromo"
     var id: String { rawValue }
@@ -97,6 +106,8 @@ struct EditSettings: Codable, Equatable {
     var hslSat = [Double](repeating: 0, count: 8)
     var hslLum = [Double](repeating: 0, count: 8)
     var bwMix = [Double](repeating: 0, count: 8)
+    // Punto de color
+    var pointColors: [PointColor] = []
     // Gradación de color
     var gradeShadows = GradeWheel(), gradeMidtones = GradeWheel(), gradeHighlights = GradeWheel(), gradeGlobal = GradeWheel()
     var gradeBlending = 50.0, gradeBalance = 0.0
@@ -146,11 +157,16 @@ struct EditSettings: Codable, Equatable {
 // MARK: - Máscaras
 
 enum MaskKind: String, Codable, CaseIterable {
-    case subject, brush, linear, radial, color, luminance
+    case subject, people, background, brush, linear, radial, color, luminance
+
+    /// Máscaras que se calculan con Vision y se guardan como imagen.
+    var isDetected: Bool { self == .subject || self == .people || self == .background }
 
     var label: String {
         switch self {
         case .subject: return "Sujeto"
+        case .people: return "Personas"
+        case .background: return "Fondo"
         case .brush: return "Pincel"
         case .linear: return "Degradado lineal"
         case .radial: return "Degradado radial"
@@ -162,6 +178,8 @@ enum MaskKind: String, Codable, CaseIterable {
     var shortLabel: String {
         switch self {
         case .subject: return "Sujeto"
+        case .people: return "Personas"
+        case .background: return "Fondo"
         case .brush: return "Pincel"
         case .linear: return "Lineal"
         case .radial: return "Radial"
@@ -173,6 +191,8 @@ enum MaskKind: String, Codable, CaseIterable {
     var icon: String {
         switch self {
         case .subject: return "person.crop.rectangle"
+        case .people: return "person.2"
+        case .background: return "mountain.2"
         case .brush: return "paintbrush.pointed"
         case .linear: return "square.tophalf.filled"
         case .radial: return "circle.dashed"
@@ -474,6 +494,7 @@ enum LUTBuilder {
         k.pcHighlights = s.pcHighlights; k.pcLights = s.pcLights; k.pcDarks = s.pcDarks; k.pcShadows = s.pcShadows
         k.curveRGB = s.curveRGB; k.curveR = s.curveR; k.curveG = s.curveG; k.curveB = s.curveB
         k.hslHue = s.hslHue; k.hslSat = s.hslSat; k.hslLum = s.hslLum; k.bwMix = s.bwMix
+        k.pointColors = s.pointColors
         k.gradeShadows = s.gradeShadows; k.gradeMidtones = s.gradeMidtones; k.gradeHighlights = s.gradeHighlights; k.gradeGlobal = s.gradeGlobal
         k.gradeBlending = s.gradeBlending; k.gradeBalance = s.gradeBalance
         k.calShadowTint = s.calShadowTint
@@ -521,6 +542,39 @@ enum LUTBuilder {
         return (r, g, b)
     }
 
+    /// Peso (0…1) con el que un color (HSL) pertenece al rango de un punto de color.
+    static func pointWeight(_ h: Double, _ sl: Double, _ l: Double, target t: (Double, Double, Double), range: Double) -> Double {
+        let tol = 0.04 + range / 100 * 0.36
+        let dh = CMath.hueDist(h, t.0) / 180 * min(1, min(sl, t.1) * 3)
+        let d = (dh * dh * 4 + (sl - t.1) * (sl - t.1) * 0.6 + (l - t.2) * (l - t.2) * 0.8).squareRoot()
+        return 1 - CMath.smoothstep(tol * 0.4, tol, d)
+    }
+
+    /// Aplica los puntos de color: variación (acerca o aleja del color elegido) y desplazamientos de tono, saturación y luminancia.
+    static func pointColor(_ r: Double, _ g: Double, _ b: Double, _ pts: [PointColor],
+                           _ targets: [(Double, Double, Double)]) -> (Double, Double, Double) {
+        var (h, sl, l) = CMath.rgbToHsl(CMath.clamp(r), CMath.clamp(g), CMath.clamp(b))
+        var changed = false
+        for (p, t) in zip(pts, targets) {
+            let w = pointWeight(h, sl, l, target: t, range: p.range)
+            guard w > 1e-4 else { continue }
+            changed = true
+            let v = p.variance / 100 * w
+            var dh = h - t.0
+            if dh > 180 { dh -= 360 } else if dh < -180 { dh += 360 }
+            h += dh * v
+            sl = CMath.clamp(sl + (sl - t.1) * v)
+            h += p.hue / 100 * 40 * w
+            sl = CMath.clamp(sl * (1 + p.sat / 100 * w))
+            l = CMath.clamp(l + p.lum / 100 * 0.3 * w * (1 - abs(2 * l - 1) * 0.6))
+        }
+        return changed ? CMath.hslToRgb(h, sl, l) : (r, g, b)
+    }
+
+    static func pointTargets(_ pts: [PointColor]) -> [(Double, Double, Double)] {
+        pts.map { $0.color.count == 3 ? CMath.rgbToHsl($0.color[0], $0.color[1], $0.color[2]) : (0, 0, 0.5) }
+    }
+
     struct WheelOffset { var r = 0.0, g = 0.0, b = 0.0, lum = 0.0 }
 
     static func wheelOffset(_ w: GradeWheel) -> WheelOffset {
@@ -540,6 +594,8 @@ enum LUTBuilder {
         let hasHSL = (hH + hS + hL).contains { $0 != 0 }
         let mono = s.profile == .mono
         let hasCal = [s.calRedHue, s.calRedSat, s.calGreenHue, s.calGreenSat, s.calBlueHue, s.calBlueSat, s.calShadowTint].contains { $0 != 0 }
+        let points = s.pointColors.filter { $0.hue != 0 || $0.sat != 0 || $0.lum != 0 || $0.variance != 0 }
+        let targets = pointTargets(points)
         let wheels = [s.gradeShadows, s.gradeMidtones, s.gradeHighlights, s.gradeGlobal]
         let hasGrade = wheels.contains { $0.sat != 0 || $0.lum != 0 }
         let oS = wheelOffset(s.gradeShadows), oM = wheelOffset(s.gradeMidtones)
@@ -556,6 +612,7 @@ enum LUTBuilder {
             for gi in 0..<n {
                 for ri in 0..<n {
                     var r = Double(ri) * inv, g = Double(gi) * inv, b = Double(bi) * inv
+                    if !points.isEmpty { (r, g, b) = pointColor(r, g, b, points, targets) }
                     if hasCal { (r, g, b) = calibrate(r, g, b, s) }
 
                     r = Spline.lookup(tr, r); g = Spline.lookup(tg, g); b = Spline.lookup(tb, b)
@@ -634,6 +691,26 @@ enum LUTBuilder {
                         w = 1 - CMath.smoothstep(tol * 0.5, tol, d)
                     }
                     let e = Float(CMath.srgbEncode(w))
+                    out[i] = e; out[i + 1] = e; out[i + 2] = e; out[i + 3] = 1
+                    i += 4
+                }
+            }
+        }
+        return out.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+
+    /// LUT cuya salida es el peso (gris) de un punto de color: para visualizar su rango.
+    static func pointMask(_ p: PointColor) -> Data {
+        let n = size
+        let t = pointTargets([p])[0]
+        var out = [Float](repeating: 0, count: n * n * n * 4)
+        let inv = 1.0 / Double(n - 1)
+        var i = 0
+        for bi in 0..<n {
+            for gi in 0..<n {
+                for ri in 0..<n {
+                    let (h, sl, l) = CMath.rgbToHsl(Double(ri) * inv, Double(gi) * inv, Double(bi) * inv)
+                    let e = Float(CMath.srgbEncode(pointWeight(h, sl, l, target: t, range: p.range)))
                     out[i] = e; out[i + 1] = e; out[i + 2] = e; out[i + 3] = 1
                     i += 4
                 }
@@ -749,6 +826,7 @@ final class Engine: @unchecked Sendable {
         var cropEditing = false     // true = sin aplicar el recorte (modo herramienta Recortar)
         var fresh = false           // true = sin cachés (exportación)
         var overlayMask: UUID?      // máscara a resaltar en rojo
+        var overlayPoint: PointColor? // punto de color cuyo rango se resalta en rojo
         var clipHigh = false        // aviso de luces quemadas
         var clipLow = false         // aviso de sombras empastadas
         var stopBeforeMasks = false // devuelve la imagen justo antes de las máscaras (para muestrear color)
@@ -778,6 +856,7 @@ final class Engine: @unchecked Sendable {
     private var clipKey: [Double] = []
     private var clipData = Data()
     private var rangeCache: [UUID: (key: [Double], data: Data)] = [:]
+    private var pointMaskCache: (key: [Double], data: Data)?
 
     // MARK: Base (decodificación)
 
@@ -1072,6 +1151,11 @@ final class Engine: @unchecked Sendable {
         if !s.masks.isEmpty {
             (img, overlay) = applyMasks(img, s, cropEditing: req.cropEditing, scale: scale, rel: rel, overlayID: req.overlayMask)
         }
+        if let p = req.overlayPoint {
+            let key = p.color + [p.range]
+            if pointMaskCache?.key != key { pointMaskCache = (key, LUTBuilder.pointMask(p)) }
+            if let data = pointMaskCache?.data { overlay = applyCube(img.applyingFilter("CIColorClamp"), data, LUTBuilder.size) }
+        }
 
         // Color global: perfil, curvas, HSL, B/N, gradación, calibración
         if !LUTBuilder.isIdentity(s) {
@@ -1259,7 +1343,7 @@ final class Engine: @unchecked Sendable {
                         mask = applyCube(img.applyingFilter("CIColorClamp"), data, LUTBuilder.size)
                     }
                 }
-            case .brush, .subject:
+            case .brush, .subject, .people, .background:
                 if let r = maskRaster(m, aspect: Double(preW / preH)) {
                     let t = CGAffineTransform(scaleX: preW / r.extent.width, y: preH / r.extent.height)
                         .concatenating(CGAffineTransform(translationX: -ox * preW, y: -(1 - oy - ch) * preH))
@@ -1329,25 +1413,109 @@ final class Engine: @unchecked Sendable {
         return px.prefix(3).map { CMath.clamp(Double($0)) }
     }
 
-    /// Calcula una máscara del sujeto principal con Vision sobre la imagen enderezada sin recortar.
-    func detectSubject(_ base: Request) -> Data? {
+    /// Imagen de análisis: enderezada sin recortar, sin máscaras ni avisos.
+    private func analysisImage(_ base: Request, maxPixel: CGFloat = 1024) -> CGImage? {
         var req = base
         req.cropEditing = true
-        req.maxPixel = 1024
+        req.maxPixel = maxPixel
         req.overlayMask = nil
+        req.overlayPoint = nil
+        req.clipHigh = false
+        req.clipLow = false
         req.settings.masks = []
-        guard let res = render(req) else { return nil }
-        let handler = VNImageRequestHandler(cgImage: res.image, options: [:])
-        let vreq = VNGenerateForegroundInstanceMaskRequest()
-        do { try handler.perform([vreq]) } catch { return nil }
-        guard let obs = vreq.results?.first,
-              let buf = try? obs.generateScaledMaskForImage(forInstances: obs.allInstances, from: handler) else { return nil }
-        let ci = CIImage(cvPixelBuffer: buf)
-        guard let cg = ctx.createCGImage(ci, from: ci.extent, format: .L8, colorSpace: CGColorSpace(name: CGColorSpace.linearGray)!) else { return nil }
+        return render(req)?.image
+    }
+
+    /// Calcula con Vision una máscara de sujeto, fondo o personas sobre la imagen enderezada sin recortar.
+    func detectMask(_ kind: MaskKind, _ base: Request) -> Data? {
+        guard let image = analysisImage(base) else { return nil }
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        var mask: CIImage?
+        if kind == .people {
+            let inst = VNGeneratePersonInstanceMaskRequest()
+            if (try? handler.perform([inst])) != nil, let obs = inst.results?.first, !obs.allInstances.isEmpty,
+               let buf = try? obs.generateScaledMaskForImage(forInstances: obs.allInstances, from: handler) {
+                mask = CIImage(cvPixelBuffer: buf)
+            } else {
+                // Personas pequeñas o de espaldas: la segmentación global las encuentra mejor
+                let seg = VNGeneratePersonSegmentationRequest()
+                seg.qualityLevel = .accurate
+                if (try? handler.perform([seg])) != nil, let obs = seg.results?.first {
+                    let m = CIImage(cvPixelBuffer: obs.pixelBuffer)
+                    mask = m.transformed(by: CGAffineTransform(scaleX: CGFloat(image.width) / m.extent.width,
+                                                               y: CGFloat(image.height) / m.extent.height))
+                }
+            }
+        } else {
+            let fg = VNGenerateForegroundInstanceMaskRequest()
+            if (try? handler.perform([fg])) != nil, let obs = fg.results?.first,
+               let buf = try? obs.generateScaledMaskForImage(forInstances: obs.allInstances, from: handler) {
+                mask = CIImage(cvPixelBuffer: buf)
+            }
+        }
+        guard var ci = mask else { return nil }
+        // Sin nada detectado la máscara sale vacía
+        let peak = ci.applyingFilter("CIAreaMaximum", parameters: [kCIInputExtentKey: CIVector(cgRect: ci.extent)])
+        var px = [Float](repeating: 0, count: 4)
+        ctx.render(peak, toBitmap: &px, rowBytes: 16, bounds: CGRect(x: 0, y: 0, width: 1, height: 1), format: .RGBAf, colorSpace: nil)
+        guard px[0] > 0.25 else { return nil }
+        // Las máscaras de personas dejan un residuo bajo en el fondo: se limpia con unos niveles
+        if kind == .people { ci = ci.redAsGray(1.25, -0.125).applyingFilter("CIColorClamp") }
+        if kind == .background { ci = ci.redAsGray(-1, 1) }
+        let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        guard let cg = ctx.createCGImage(ci, from: rect, format: .L8, colorSpace: CGColorSpace(name: CGColorSpace.linearGray)!) else { return nil }
         let out = NSMutableData()
         guard let dest = CGImageDestinationCreateWithData(out, UTType.png.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(dest, cg, nil)
         return CGImageDestinationFinalize(dest) ? out as Data : nil
+    }
+
+    /// Luminancia media logarítmica (lineal) del revelado: el brillo percibido, para igualar exposiciones.
+    func keyLuminance(_ req: Request) -> Double? {
+        guard let (img, _) = pipeline(req) else { return nil }
+        let k = min(1, 256 / max(img.extent.width, img.extent.height, 1))
+        let small = img.transformed(by: CGAffineTransform(scaleX: k, y: k))
+        let r = small.extent.integral
+        let w = Int(r.width), h = Int(r.height)
+        guard w > 0, h > 0 else { return nil }
+        var px = [Float](repeating: 0, count: w * h * 4)
+        ctx.render(small, toBitmap: &px, rowBytes: w * 16, bounds: r, format: .RGBAf, colorSpace: linearSpace)
+        var sum = 0.0
+        for i in stride(from: 0, to: px.count, by: 4) {
+            let L = 0.2126 * Double(px[i]) + 0.7152 * Double(px[i + 1]) + 0.0722 * Double(px[i + 2])
+            sum += log(max(L, 1e-4))
+        }
+        return exp(sum / Double(w * h))
+    }
+
+    /// Ángulo de enderezado (grados, como `cropAngle`) que nivela la foto. Se fía de las líneas rectas
+    /// casi horizontales o verticales; el horizonte de Vision solo cuenta si coincide con ellas.
+    func autoStraightenAngle(_ base: Request) -> Double? {
+        var req = base
+        req.settings.cropAngle = 0
+        guard let image = analysisImage(req) else { return nil }
+        var tilt = 0.0, confidence = 0.0
+        for pass in 0..<3 {
+            let cg: CGImage
+            if pass == 0 {
+                cg = image
+            } else {
+                let t = straighten(CIImage(cgImage: image), -tilt)
+                guard let r = ctx.createCGImage(t, from: t.extent, format: .RGBA8, colorSpace: sRGBSpace) else { break }
+                cg = r
+            }
+            guard let (d, c) = ImageUtil.lineTilt(cg) else { return nil }
+            if pass == 0 { confidence = c }
+            tilt += d
+            if abs(d) < 0.05 { break }
+        }
+        if confidence >= 3 { return -tilt }
+        let hz = VNDetectHorizonRequest()
+        if (try? VNImageRequestHandler(cgImage: image, options: [:]).perform([hz])) != nil, let obs = hz.results?.first {
+            let h = Double(obs.angle) * 180 / .pi
+            if abs(h - tilt) < 1 { return -(h + tilt) / 2 }
+        }
+        return nil
     }
 
     func render(_ req: Request) -> Result? {
@@ -1464,6 +1632,90 @@ enum ImageUtil {
             c.draw(sub, in: CGRect(x: 0, y: 0, width: 1, height: 1))
         }
         return (Double(px[0]) / 255, Double(px[1]) / 255, Double(px[2]) / 255)
+    }
+
+    /// Giro aparente (grados) de las líneas casi horizontales o verticales y una confianza (pico / media).
+    /// Usa el tensor de estructura: solo cuentan los bordes rectos y coherentes, no las texturas.
+    static func lineTilt(_ cg: CGImage) -> (Double, Double)? {
+        let sc = min(1, 720 / Double(max(cg.width, cg.height)))
+        let w = max(16, Int(Double(cg.width) * sc)), h = max(16, Int(Double(cg.height) * sc))
+        var g = [UInt8](repeating: 0, count: w * h)
+        g.withUnsafeMutableBytes { p in
+            guard let c = CGContext(data: p.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                                    space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return }
+            c.interpolationQuality = .high
+            c.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        }
+        // Productos del gradiente (Sobel)
+        var xx = [Float](repeating: 0, count: w * h), yy = xx, xy = xx
+        for y in 1..<h - 1 {
+            for x in 1..<w - 1 {
+                func v(_ dx: Int, _ dy: Int) -> Float { Float(g[(y + dy) * w + x + dx]) }
+                let gx = (v(1, -1) + 2 * v(1, 0) + v(1, 1)) - (v(-1, -1) + 2 * v(-1, 0) + v(-1, 1))
+                let gy = (v(-1, 1) + 2 * v(0, 1) + v(1, 1)) - (v(-1, -1) + 2 * v(0, -1) + v(1, -1))
+                let i = y * w + x
+                xx[i] = gx * gx; yy[i] = gy * gy; xy[i] = gx * gy
+            }
+        }
+        // Suma en ventanas de 7×7 (caja separable)
+        func box(_ a: [Float]) -> [Float] {
+            let r = 3
+            var t = [Float](repeating: 0, count: w * h), o = t
+            for y in 0..<h {
+                var s: Float = 0
+                for x in 0..<w + r {
+                    if x < w { s += a[y * w + x] }
+                    if x - 2 * r - 1 >= 0 { s -= a[y * w + x - 2 * r - 1] }
+                    if x >= r { t[y * w + x - r] = s }
+                }
+            }
+            for x in 0..<w {
+                var s: Float = 0
+                for y in 0..<h + r {
+                    if y < h { s += t[y * w + x] }
+                    if y - 2 * r - 1 >= 0 { s -= t[(y - 2 * r - 1) * w + x] }
+                    if y >= r { o[(y - r) * w + x] = s }
+                }
+            }
+            return o
+        }
+        let jxx = box(xx), jyy = box(yy), jxy = box(xy)
+        // Histograma de desviaciones respecto al eje más cercano, de −10° a 10° en pasos de 0,05°
+        let bins = 401
+        var hist = [Double](repeating: 0, count: bins)
+        for y in 4..<h - 4 {
+            for x in 4..<w - 4 {
+                let i = y * w + x
+                let a = Double(jxx[i]), b = Double(jyy[i]), c = Double(jxy[i])
+                let tr = a + b
+                guard tr > 1e4 else { continue }
+                let diff = ((a - b) * (a - b) + 4 * c * c).squareRoot()
+                let coh = diff / tr
+                guard coh > 0.6 else { continue }
+                var ang = (0.5 * atan2(2 * c, a - b) * 180 / .pi).truncatingRemainder(dividingBy: 90)
+                if ang > 45 { ang -= 90 } else if ang < -45 { ang += 90 }
+                guard abs(ang) <= 10 else { continue }
+                hist[Int(((ang + 10) * 20).rounded())] += diff.squareRoot() * coh * coh
+            }
+        }
+        var sm = [Double](repeating: 0, count: bins)
+        for i in 0..<bins {
+            var s = 0.0, ws = 0.0
+            for k in -8...8 where i + k >= 0 && i + k < bins {
+                let wt = exp(-Double(k * k) / 18)
+                s += hist[i + k] * wt
+                ws += wt
+            }
+            sm[i] = s / ws
+        }
+        guard let peak = sm.indices.max(by: { sm[$0] < sm[$1] }), sm[peak] > 0 else { return nil }
+        let mean = sm.reduce(0, +) / Double(bins)
+        var off = 0.0
+        if peak > 0 && peak < bins - 1 {
+            let a = sm[peak - 1], b = sm[peak], c = sm[peak + 1], d = a - 2 * b + c
+            if d != 0 { off = 0.5 * (a - c) / d }
+        }
+        return ((Double(peak) + off) / 20 - 10, sm[peak] / mean)
     }
 
     static func exifSummary(_ url: URL) -> (String, CGSize) {
@@ -1603,10 +1855,12 @@ let wbPresets = [
 @MainActor
 final class Store: ObservableObject {
     enum Module { case library, develop }
-    enum Tool { case none, crop, whiteBalance, mask, heal }
+    enum Tool { case none, crop, whiteBalance, mask, heal, pointColor }
 
     @Published var photos: [Photo] = []
     @Published var selectedID: UUID?
+    /// Fotos marcadas además de la actual (⌘-clic / ⇧-clic en la tira).
+    @Published var multiSelection: Set<UUID> = []
     @Published var settings = EditSettings() {
         didSet { if !loading && settings != oldValue { scheduleRender() } }
     }
@@ -1624,6 +1878,9 @@ final class Store: ObservableObject {
     @Published var brushFeather = 50.0
     @Published var brushFlow = 100.0
     @Published var brushErase = false
+    // Punto de color
+    @Published var selectedPointID: UUID? { didSet { if showPointRange { scheduleRender() } } }
+    @Published var showPointRange = false { didSet { scheduleRender() } }
     // Comparación, avisos y visualización
     @Published var splitView = false { didSet { scheduleRender() } }
     @Published var splitPosition = 0.5
@@ -1779,6 +2036,7 @@ final class Store: ObservableObject {
         let wasSelected = id == selectedID
         photos.remove(at: i)
         histories[id] = nil
+        multiSelection.remove(id)
         if wasSelected {
             selectedID = nil
             preview = nil
@@ -1804,11 +2062,27 @@ final class Store: ObservableObject {
         tool = .none
         selectedMaskID = nil
         selectedHealID = nil
+        selectedPointID = nil
+        showPointRange = false
+        multiSelection.remove(id)
         beforePreview = nil
         beforeKey = nil
         navigatorPreview = nil
         endEditing()
         scheduleRender()
+    }
+
+    /// Clic en una miniatura: ⌘ marca o desmarca la foto, ⇧ marca el intervalo desde la actual.
+    func click(_ id: UUID) {
+        let flags = NSEvent.modifierFlags
+        if flags.contains(.command), let cur = selectedID, id != cur {
+            if multiSelection.contains(id) { multiSelection.remove(id) } else { multiSelection.insert(id) }
+        } else if flags.contains(.shift), let cur = selectedID, let a = currentIndex, let b = photos.firstIndex(where: { $0.id == id }) {
+            multiSelection = Set(photos[min(a, b)...max(a, b)].map(\.id)).subtracting([cur])
+        } else {
+            multiSelection = []
+            select(id)
+        }
     }
 
     func step(_ d: Int) {
@@ -1832,6 +2106,7 @@ final class Store: ObservableObject {
                                  cropEditing: tool == .crop, overlayMask: activeOverlay)
         req.clipHigh = clipHigh
         req.clipLow = clipLow
+        req.overlayPoint = showBefore ? nil : activePointOverlay
         var beforeReq: Engine.Request?
         if splitActive {
             let key = BeforeKey(url: photo.url, settings: before, maxPixel: maxPx)
@@ -1902,7 +2177,8 @@ final class Store: ObservableObject {
     }
 
     private func updateThumbnailFromPreview() {
-        guard !showBefore, tool != .crop, activeOverlay == nil, !clipHigh, !clipLow, let cg = preview, let i = currentIndex else { return }
+        guard !showBefore, tool != .crop, activeOverlay == nil, activePointOverlay == nil, !clipHigh, !clipLow,
+              let cg = preview, let i = currentIndex else { return }
         thumbDirty = false
         photos[i].thumbnail = ImageUtil.downscale(cg, max: 320)
     }
@@ -1921,6 +2197,18 @@ final class Store: ObservableObject {
         thumbDirty = true
         if !inFlight { updateThumbnailFromPreview() }
         saveCatalogSoon()
+    }
+
+    /// Cambia los ajustes de otra foto (no la abierta) dejando constancia en su historial.
+    private func commitOther(_ id: UUID, _ s: EditSettings, _ name: String) {
+        guard let i = photos.firstIndex(where: { $0.id == id }) else { return }
+        var h = histories[id] ?? HistoryState(entries: [HistoryEntry(name: "Importar", settings: photos[i].settings)], index: 0)
+        h.entries = Array(h.entries.prefix(h.index + 1))
+        h.entries.append(HistoryEntry(name: name, settings: s))
+        h.index = h.entries.count - 1
+        histories[id] = h
+        photos[i].settings = s
+        loadThumbnail(photos[i])
     }
 
     func jumpHistory(_ index: Int) {
@@ -2052,6 +2340,122 @@ final class Store: ObservableObject {
         commit("Tono automático")
     }
 
+    /// Iguala el brillo de las fotos marcadas (o de todas) al de la foto actual ajustando solo su exposición.
+    func matchExposure() {
+        guard let ref = current, let ci = currentIndex else { return }
+        photos[ci].settings = settings
+        var targets = photos.filter { multiSelection.contains($0.id) }
+        if targets.isEmpty {
+            guard photos.count > 1 else { flash("Importa más fotos para igualar su exposición"); return }
+            let a = NSAlert()
+            a.messageText = "Igualar exposición"
+            a.informativeText = "No hay otras fotos marcadas (⌘-clic o ⇧-clic en la tira). "
+                + "¿Igualar la exposición de las otras \(photos.count - 1) fotos a la de esta?"
+            a.addButton(withTitle: "Igualar todas")
+            a.addButton(withTitle: "Cancelar")
+            guard a.runModal() == .alertFirstButtonReturn else { return }
+            targets = photos.filter { $0.id != ref.id }
+        }
+        status = "Igualando exposición…"
+        let refReq = Engine.Request(url: ref.url, isRAW: ref.isRAW, settings: settings, maxPixel: 384)
+        let jobs = targets.map { ($0.id, Engine.Request(url: $0.url, isRAW: $0.isRAW, settings: $0.settings, maxPixel: 384)) }
+        thumbQueue.async { [thumbEngine] in
+            let key = thumbEngine.keyLuminance(refReq)
+            var out: [(UUID, Double)] = []
+            if let key {
+                for (id, base) in jobs {
+                    // La curva de tonos comprime la respuesta: se itera hasta que el brillo coincide
+                    var req = base
+                    for _ in 0..<4 {
+                        guard let k = thumbEngine.keyLuminance(req) else { break }
+                        let d = log2(key / max(k, 1e-5))
+                        let next = CMath.clamp(req.settings.exposure + d, -5, 5)
+                        if abs(d) < 0.02 || next == req.settings.exposure { break }
+                        req.settings.exposure = next
+                    }
+                    out.append((id, (req.settings.exposure * 100).rounded() / 100))
+                }
+            }
+            DispatchQueue.main.async {
+                guard key != nil else { self.flash("No se ha podido medir la foto de referencia"); return }
+                var changed = 0
+                for (id, ev) in out {
+                    guard let i = self.photos.firstIndex(where: { $0.id == id }) else { continue }
+                    var s = id == self.selectedID ? self.settings : self.photos[i].settings
+                    guard abs(s.exposure - ev) >= 0.01 else { continue }
+                    s.exposure = ev
+                    if id == self.selectedID {
+                        self.settings = s
+                        self.commit("Igualar exposición")
+                    } else {
+                        self.commitOther(id, s, "Igualar exposición")
+                    }
+                    changed += 1
+                }
+                self.flash(changed == 0 ? "La exposición ya coincide" : "Exposición igualada en \(changed) \(changed == 1 ? "foto" : "fotos")")
+                self.saveCatalogSoon()
+            }
+        }
+    }
+
+    /// Endereza la foto nivelando el horizonte o las líneas rectas.
+    func autoStraighten() {
+        guard let photo = current else { return }
+        status = "Buscando el horizonte…"
+        let req = Engine.Request(url: photo.url, isRAW: photo.isRAW, settings: settings)
+        let id = photo.id
+        renderQueue.async { [engine] in
+            let angle = engine.autoStraightenAngle(req)
+            DispatchQueue.main.async {
+                self.status = nil
+                guard self.selectedID == id else { return }
+                guard let angle else { self.flash("No se ha encontrado un horizonte ni líneas rectas claras"); return }
+                let a = (angle * 10).rounded() / 10
+                if abs(a - self.settings.cropAngle) < 0.05 { self.flash("La foto ya está recta"); return }
+                self.settings.cropAngle = a
+                self.commit("Enderezar automáticamente")
+            }
+        }
+    }
+
+    // MARK: Punto de color
+
+    var pointIndex: Int? { settings.pointColors.firstIndex { $0.id == selectedPointID } }
+    var activePointOverlay: PointColor? { showPointRange && tool != .mask ? pointIndex.map { settings.pointColors[$0] } : nil }
+
+    func bindPoint(_ kp: WritableKeyPath<PointColor, Double>) -> Binding<Double> {
+        Binding(get: {
+            guard let i = self.pointIndex else { return PointColor()[keyPath: kp] }
+            return self.settings.pointColors[i][keyPath: kp]
+        }, set: { v in
+            guard let i = self.pointIndex else { return }
+            self.settings.pointColors[i][keyPath: kp] = v
+        })
+    }
+
+    func pickPointColor(at p: CGPoint) {
+        guard let photo = current else { return }
+        let req = Engine.Request(url: photo.url, isRAW: photo.isRAW, settings: settings, maxPixel: previewTarget)
+        renderQueue.async { [engine] in
+            let c = engine.sampleMaskStage(req, at: p)
+            DispatchQueue.main.async {
+                self.tool = .none
+                guard let c else { return }
+                guard self.settings.pointColors.count < 8 else { self.flash("Máximo 8 puntos de color por foto"); return }
+                let pc = PointColor(color: c)
+                self.settings.pointColors.append(pc)
+                self.selectedPointID = pc.id
+                self.commit("Nuevo punto de color")
+            }
+        }
+    }
+
+    func deletePointColor(_ id: UUID) {
+        settings.pointColors.removeAll { $0.id == id }
+        if selectedPointID == id { selectedPointID = settings.pointColors.last?.id }
+        commit("Eliminar punto de color")
+    }
+
     // MARK: Máscaras
 
     var maskIndex: Int? { settings.masks.firstIndex { $0.id == selectedMaskID } }
@@ -2079,7 +2483,7 @@ final class Store: ObservableObject {
         case .radial:
             m.cx = s.cropX + s.cropW / 2; m.cy = s.cropY + s.cropH / 2
             m.rx = 0.25 * s.cropW; m.ry = m.rx * imageAspect
-        case .subject:
+        case .subject, .people, .background:
             m.raster = raster
         case .brush, .color, .luminance:
             break
@@ -2091,22 +2495,26 @@ final class Store: ObservableObject {
         commit("Nueva máscara: \(kind.label)")
     }
 
-    func addSubjectMask(replacing id: UUID? = nil) {
+    /// Crea (o vuelve a calcular) una máscara de sujeto, personas o fondo con Vision.
+    func addDetectedMask(_ kind: MaskKind, replacing id: UUID? = nil) {
         guard let photo = current else { return }
-        status = "Detectando sujeto…"
+        status = kind == .people ? "Detectando personas…" : (kind == .background ? "Detectando fondo…" : "Detectando sujeto…")
         var s = settings
         s.masks = []
         let req = Engine.Request(url: photo.url, isRAW: photo.isRAW, settings: s)
         renderQueue.async { [engine] in
-            let data = engine.detectSubject(req)
+            let data = engine.detectMask(kind, req)
             DispatchQueue.main.async {
                 self.status = nil
-                guard let data else { self.flash("No se ha encontrado ningún sujeto"); return }
+                guard let data else {
+                    self.flash(kind == .people ? "No se han encontrado personas" : "No se ha encontrado ningún sujeto")
+                    return
+                }
                 if let id, let i = self.settings.masks.firstIndex(where: { $0.id == id }) {
                     self.settings.masks[i].raster = data
-                    self.commit("Volver a detectar sujeto")
+                    self.commit("Volver a detectar: \(kind.label)")
                 } else {
-                    self.addMask(.subject, raster: data)
+                    self.addMask(kind, raster: data)
                 }
             }
         }
@@ -2433,7 +2841,7 @@ final class Store: ObservableObject {
         }
         guard var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return data }
         let defaults = json(EditSettings()), maskDefaults = json(Mask.placeholder)
-        let healDefaults = json(HealSpot(x: 0, y: 0, sx: 0, sy: 0, size: 0.02))
+        let healDefaults = json(HealSpot(x: 0, y: 0, sx: 0, sy: 0, size: 0.02)), pointDefaults = json(PointColor())
         /// Mezcla profunda: lo guardado gana, lo que falta se toma de los valores por defecto.
         func merge(_ d: [String: Any], _ saved: [String: Any]) -> [String: Any] {
             var out = d
@@ -2446,6 +2854,7 @@ final class Store: ObservableObject {
             var st = merge(defaults, saved)
             st["masks"] = ((st["masks"] as? [[String: Any]]) ?? []).map { merge(maskDefaults, $0) }
             st["heals"] = ((st["heals"] as? [[String: Any]]) ?? []).map { merge(healDefaults, $0) }
+            st["pointColors"] = ((st["pointColors"] as? [[String: Any]]) ?? []).map { merge(pointDefaults, $0) }
             return st
         }
         func fix(_ list: Any?) -> [[String: Any]] {
@@ -3059,6 +3468,8 @@ struct CropPanel: View {
             }
             LRSlider("Ángulo", store.bind(\.cropAngle), -45...45, step: 0.1, decimals: 1)
             HStack {
+                SmallButton("Enderezar auto") { store.autoStraighten() }
+                    .help("Nivela el horizonte o las líneas rectas de la foto")
                 Spacer()
                 SmallButton("Restablecer recorte") { store.resetCrop() }
             }
@@ -3176,7 +3587,7 @@ struct MaskPanel: View {
 
     private func createButton(_ kind: MaskKind) -> some View {
         Button {
-            if kind == .subject { store.addSubjectMask() } else { store.addMask(kind) }
+            if kind.isDetected { store.addDetectedMask(kind) } else { store.addMask(kind) }
         } label: {
             VStack(spacing: 5) {
                 Image(systemName: kind.icon).font(.system(size: 15, weight: .light))
@@ -3191,7 +3602,16 @@ struct MaskPanel: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(kind == .subject ? "Detecta automáticamente el sujeto principal" : kind.label)
+        .help(createHelp(kind))
+    }
+
+    private func createHelp(_ kind: MaskKind) -> String {
+        switch kind {
+        case .subject: return "Detecta automáticamente el sujeto principal"
+        case .people: return "Detecta automáticamente a todas las personas"
+        case .background: return "Selecciona todo lo que no es el sujeto principal"
+        default: return kind.label
+        }
     }
 
     private func maskRow(_ m: Mask) -> some View {
@@ -3261,11 +3681,11 @@ struct MaskPanel: View {
             HintText("Pinta sobre la foto para añadir zona a la máscara.")
         case .linear:
             HintText("Arrastra sobre la foto para trazar el degradado. El punto central lo mueve; los extremos ajustan la transición.")
-        case .subject:
+        case .subject, .people, .background:
             HStack(alignment: .top) {
                 HintText("Si cambias la geometría o el enderezado, vuelve a detectar.")
                 Spacer()
-                SmallButton("Volver a detectar") { store.addSubjectMask(replacing: m.id) }
+                SmallButton("Volver a detectar") { store.addDetectedMask(m.kind, replacing: m.id) }
             }
         case .color:
             HStack(spacing: 10) {
@@ -3702,6 +4122,7 @@ struct ToneCurvePanel: View {
 struct HSLPanel: View {
     @EnvironmentObject var store: Store
     @AppStorage("hslMode") private var mode = 0
+    @AppStorage("hslPointTab") private var pointTab = false
 
     var body: some View {
         let mono = store.settings.profile == .mono
@@ -3711,10 +4132,15 @@ struct HSLPanel: View {
                     LRSlider(hslNames[i], store.bindIndex(\.bwMix, i), track: [Color(white: 0.15), bandColor(i)])
                 }
             } else {
-                Segmented(selection: $mode, options: [(0, "Tono"), (1, "Saturación"), (2, "Luminancia"), (3, "Todo")])
-                if mode == 0 || mode == 3 { group("Tono", \.hslHue, hueTrack) }
-                if mode == 1 || mode == 3 { group("Saturación", \.hslSat) { [Color(white: 0.5), bandColor($0)] } }
-                if mode == 2 || mode == 3 { group("Luminancia", \.hslLum) { [Color(white: 0.08), bandColor($0), Color(white: 0.95)] } }
+                Segmented(selection: $pointTab, options: [(false, "Mezcla"), (true, "Punto de color")])
+                if pointTab {
+                    PointColorEditor()
+                } else {
+                    Segmented(selection: $mode, options: [(0, "Tono"), (1, "Saturación"), (2, "Luminancia"), (3, "Todo")])
+                    if mode == 0 || mode == 3 { group("Tono", \.hslHue, hueTrack) }
+                    if mode == 1 || mode == 3 { group("Saturación", \.hslSat) { [Color(white: 0.5), bandColor($0)] } }
+                    if mode == 2 || mode == 3 { group("Luminancia", \.hslLum) { [Color(white: 0.08), bandColor($0), Color(white: 0.95)] } }
+                }
             }
         }
     }
@@ -3734,6 +4160,65 @@ struct HSLPanel: View {
         return [Color(hue: ((h - 30 + 360).truncatingRemainder(dividingBy: 360)) / 360, saturation: 0.8, brightness: 0.9),
                 bandColor(i),
                 Color(hue: ((h + 30).truncatingRemainder(dividingBy: 360)) / 360, saturation: 0.8, brightness: 0.9)]
+    }
+}
+
+/// Punto de color: muestras elegidas con el cuentagotas, cada una con sus desplazamientos.
+struct PointColorEditor: View {
+    @EnvironmentObject var store: Store
+
+    var body: some View {
+        let pts = store.settings.pointColors
+        HStack(spacing: 6) {
+            IconButton(icon: "eyedropper", help: "Elegir un color de la foto", active: store.tool == .pointColor, size: 12) {
+                store.toggleTool(.pointColor)
+            }
+            ForEach(pts) { p in
+                let on = p.id == store.selectedPointID
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(swatch(p.color))
+                    .frame(width: 22, height: 22)
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(on ? Color.white : Color.white.opacity(0.2), lineWidth: on ? 2 : 1))
+                    .contentShape(Rectangle())
+                    .onTapGesture { store.selectedPointID = p.id }
+                    .contextMenu { Button("Eliminar") { store.deletePointColor(p.id) } }
+            }
+            Spacer()
+        }
+        .padding(.top, 4)
+        if let i = store.pointIndex {
+            let p = pts[i]
+            let t = LUTBuilder.pointTargets([p])[0]
+            let res = LUTBuilder.pointColor(p.color[0], p.color[1], p.color[2], [p], [t])
+            HStack(spacing: 8) {
+                FieldLabel("Color")
+                RoundedRectangle(cornerRadius: 3).fill(swatch(p.color)).frame(width: 40, height: 14)
+                Image(systemName: "arrow.right").font(.system(size: 9)).foregroundColor(Theme.dim)
+                RoundedRectangle(cornerRadius: 3).fill(Color(red: res.0, green: res.1, blue: res.2)).frame(width: 40, height: 14)
+                Spacer()
+            }
+            LRSlider("Tono", store.bindPoint(\.hue), track: [hueColor(t.0 - 40), hueColor(t.0), hueColor(t.0 + 40)])
+            LRSlider("Saturación", store.bindPoint(\.sat), track: [Color(white: 0.5), hueColor(t.0)])
+            LRSlider("Luminancia", store.bindPoint(\.lum), track: [Color(white: 0.08), hueColor(t.0), Color(white: 0.95)])
+            LRSlider("Variación", store.bindPoint(\.variance))
+            LRSlider("Rango", store.bindPoint(\.range), 0...100, def: 50)
+            HStack {
+                Toggle("Visualizar rango", isOn: $store.showPointRange).toggleStyle(MonoCheckbox())
+                Spacer()
+                SmallButton("Eliminar") { store.deletePointColor(p.id) }
+            }
+            .padding(.top, 2)
+        } else {
+            HintText(pts.isEmpty
+                ? "Pulsa el cuentagotas y haz clic en la foto para ajustar solo ese color (hasta 8)."
+                : "Selecciona una muestra para ajustarla.")
+        }
+    }
+
+    private func swatch(_ c: [Double]) -> Color { c.count == 3 ? Color(red: c[0], green: c[1], blue: c[2]) : .gray }
+
+    private func hueColor(_ h: Double) -> Color {
+        Color(hue: ((h.truncatingRemainder(dividingBy: 360)) + 360).truncatingRemainder(dividingBy: 360) / 360, saturation: 0.8, brightness: 0.9)
     }
 }
 
@@ -4036,7 +4521,7 @@ struct MaskOverlay: View {
                 handle(ctx, CGPoint(x: r.c.x - u.x * d, y: r.c.y - u.y * d))
             }
             handle(ctx, r.c, filled: true)
-        case .brush, .subject, .color, .luminance:
+        case .brush, .subject, .people, .background, .color, .luminance:
             break
         }
     }
@@ -4045,7 +4530,7 @@ struct MaskOverlay: View {
         func near(_ a: CGPoint, _ d: CGFloat = 12) -> Bool { hypot(a.x - p.x, a.y - p.y) < d }
         switch m.kind {
         case .brush: return .paint
-        case .subject: return nil
+        case .subject, .people, .background: return nil
         case .color, .luminance: return .pick
         case .linear:
             let p0 = toView(m.x0, m.y0, s, size), p1 = toView(m.x1, m.y1, s, size)
@@ -4379,10 +4864,13 @@ struct ImageOverlay: View {
             switch store.tool {
             case .crop:
                 CropOverlay(rect: store.cropRect, ratio: store.normalizedCropRatio) { store.commit("Recortar") }
-            case .whiteBalance:
+            case .whiteBalance, .pointColor:
                 Color.clear
                     .contentShape(Rectangle())
-                    .onTapGesture { loc in store.sampleWhiteBalance(at: CGPoint(x: loc.x / g.size.width, y: loc.y / g.size.height)) }
+                    .onTapGesture { loc in
+                        let p = CGPoint(x: loc.x / g.size.width, y: loc.y / g.size.height)
+                        if store.tool == .pointColor { store.pickPointColor(at: p) } else { store.sampleWhiteBalance(at: p) }
+                    }
                     .onContinuousHover { phase in
                         if case .active = phase { NSCursor.crosshair.set() } else { NSCursor.arrow.set() }
                     }
@@ -4573,10 +5061,12 @@ struct CanvasView: View {
     private var badges: [String] {
         var b: [String] = []
         if store.showBefore { b.append("Antes") }
+        if store.activePointOverlay != nil { b.append("Rango del punto de color") }
         if store.zoomed && store.tool == .none { b.append("1:1") }
         if store.clipHigh || store.clipLow { b.append("Aviso de recorte") }
         switch store.tool {
         case .whiteBalance: b.append("Haz clic en una zona neutra (gris o blanca)")
+        case .pointColor: b.append("Haz clic en el color que quieres ajustar")
         case .mask where store.settings.masks.isEmpty: b.append("Crea una máscara en el panel derecho")
         case .heal where store.settings.heals.isEmpty: b.append("Haz clic sobre una mancha para eliminarla")
         default: break
@@ -4607,6 +5097,7 @@ struct EmptyState: View {
 struct ThumbCell: View {
     let photo: Photo
     let selected: Bool
+    var marked = false
     @Local private var hover = false
 
     var body: some View {
@@ -4625,8 +5116,9 @@ struct ThumbCell: View {
             .padding(4)
         }
         .clipShape(RoundedRectangle(cornerRadius: 4))
-        .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Color.white : Color.white.opacity(hover ? 0.2 : 0.05), lineWidth: selected ? 1.5 : 1))
-        .opacity(selected || hover ? 1 : 0.72)
+        .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Color.white : Color.white.opacity(marked ? 0.55 : (hover ? 0.2 : 0.05)),
+                                                          lineWidth: selected || marked ? 1.5 : 1))
+        .opacity(selected || marked || hover ? 1 : 0.72)
         .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hover = h } }
     }
 
@@ -4658,10 +5150,10 @@ struct Filmstrip: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 6) {
                     ForEach(store.photos) { p in
-                        ThumbCell(photo: p, selected: p.id == store.selectedID)
+                        ThumbCell(photo: p, selected: p.id == store.selectedID, marked: store.multiSelection.contains(p.id))
                             .frame(width: 92, height: 66)
                             .id(p.id)
-                            .onTapGesture { store.select(p.id) }
+                            .onTapGesture { store.click(p.id) }
                             .contextMenu { PhotoContextMenu(photo: p) }
                     }
                 }
@@ -4686,7 +5178,8 @@ struct LibraryGrid: View {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), spacing: 14)], spacing: 14) {
                     ForEach(store.photos) { p in
                         VStack(alignment: .leading, spacing: 6) {
-                            ThumbCell(photo: p, selected: p.id == store.selectedID).frame(height: 150)
+                            ThumbCell(photo: p, selected: p.id == store.selectedID, marked: store.multiSelection.contains(p.id))
+                                .frame(height: 150)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(p.name).font(.system(size: 11, weight: .medium)).foregroundColor(Theme.text).lineLimit(1)
                                 Text(p.exif.isEmpty ? " " : p.exif).font(.system(size: 9.5)).foregroundColor(Theme.dim).lineLimit(1)
@@ -4694,14 +5187,14 @@ struct LibraryGrid: View {
                             .padding(.horizontal, 2)
                         }
                         .padding(8)
-                        .hoverBackground(radius: 8, active: p.id == store.selectedID)
+                        .hoverBackground(radius: 8, active: p.id == store.selectedID || store.multiSelection.contains(p.id))
                         .contentShape(Rectangle())
                         .onTapGesture(count: 2) {
                             store.select(p.id)
                             store.module = .develop
                             store.scheduleRender()
                         }
-                        .onTapGesture { store.select(p.id) }
+                        .onTapGesture { store.click(p.id) }
                         .contextMenu { PhotoContextMenu(photo: p) }
                     }
                 }
@@ -4787,6 +5280,11 @@ struct BottomBar: View {
                 }
             }
             Spacer()
+            if !store.multiSelection.isEmpty {
+                Text("\(store.multiSelection.count + 1) marcadas").font(.system(size: 10.5)).foregroundColor(Theme.secondary)
+                Button("Igualar exposición") { store.matchExposure() }.buttonStyle(GhostButtonStyle(compact: true))
+                    .help("Iguala el brillo de las fotos marcadas al de la actual (⌥⇧⌘M)")
+            }
             Button("Importar…") { store.importPanel() }.buttonStyle(GhostButtonStyle(compact: true))
             Button("Exportar…") { store.showExport = true }.buttonStyle(GhostButtonStyle(prominent: true, compact: true))
                 .disabled(store.photos.isEmpty)
@@ -4804,9 +5302,10 @@ struct ShortcutsSheet: View {
                           ("O", "Superposición de máscara"), ("H", "Mostrar puntos de corrección"), ("X", "Orientación del recorte"),
                           ("↩ / Esc", "Cerrar herramienta"), ("⌫", "Borrar máscara o corrección")]),
         ("Vista", [("Z / espacio", "Zoom 1:1"), ("\\", "Antes"), ("Y", "Antes / después dividido"), ("J", "Aviso de recorte"),
-                   ("Tab", "Ocultar paneles"), ("G / D", "Biblioteca / Revelar"), ("← →", "Foto anterior / siguiente")]),
+                   ("Tab", "Ocultar paneles"), ("G / D", "Biblioteca / Revelar"), ("← →", "Foto anterior / siguiente"),
+                   ("⌘ / ⇧ + clic", "Marcar varias fotos")]),
         ("Edición", [("⌘Z / ⇧⌘Z", "Deshacer / rehacer"), ("⇧⌘C / ⇧⌘V", "Copiar / pegar ajustes"), ("⌥⌘V", "Ajustes anteriores"),
-                     ("⇧⌘R", "Restablecer"), ("⌘U", "Tono automático"), ("⌘[ / ⌘]", "Girar"),
+                     ("⇧⌘R", "Restablecer"), ("⌘U", "Tono automático"), ("⌥⇧⌘M", "Igualar exposición"), ("⌘[ / ⌘]", "Girar"),
                      ("Doble clic", "Restablecer un deslizador"), ("⌥ + arrastrar", "Ajuste fino")]),
         ("Archivo", [("⇧⌘I", "Importar"), ("⇧⌘E", "Exportar"), ("⇧⌘N", "Nuevo ajuste preestablecido")]),
     ]
@@ -4932,6 +5431,8 @@ struct RevelaApp: App {
                 Divider()
                 Button("Tono automático") { store.autoTone() }.keyboardShortcut("u")
                 Button("Balance de blancos automático") { store.autoWhiteBalance() }.keyboardShortcut("u", modifiers: [.command, .shift])
+                Button("Igualar exposición") { store.matchExposure() }.keyboardShortcut("m", modifiers: [.command, .option, .shift])
+                    .disabled(store.photos.count < 2)
                 Divider()
                 Button("Girar a la izquierda") { store.rotate(-1) }.keyboardShortcut("[")
                 Button("Girar a la derecha") { store.rotate(1) }.keyboardShortcut("]")
@@ -4950,7 +5451,10 @@ struct RevelaApp: App {
                 Button("Eliminar manchas  (Q)") { store.toggleTool(.heal) }
                 Button("Balance de blancos  (W)") { store.toggleTool(.whiteBalance) }
                 Button("Máscaras  (M)") { store.toggleTool(.mask) }
-                Button("Seleccionar sujeto") { store.addSubjectMask() }.disabled(store.current == nil)
+                Button("Seleccionar sujeto") { store.addDetectedMask(.subject) }.disabled(store.current == nil)
+                Button("Seleccionar personas") { store.addDetectedMask(.people) }.disabled(store.current == nil)
+                Button("Seleccionar fondo") { store.addDetectedMask(.background) }.disabled(store.current == nil)
+                Button("Enderezar automáticamente") { store.autoStraighten() }.disabled(store.current == nil)
                 Button("Antes  (\\)") { store.showBefore.toggle() }
                 Button("Antes / después dividido  (Y)") { store.splitView.toggle() }
                 Button("Aviso de recorte  (J)") { let on = !(store.clipHigh || store.clipLow); store.clipHigh = on; store.clipLow = on }
