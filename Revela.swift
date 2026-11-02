@@ -356,15 +356,25 @@ struct Mask: Codable, Equatable, Identifiable {
 
 enum HealMode: String, Codable { case heal, clone }
 
-/// Punto de la herramienta Eliminar. Coordenadas como las máscaras (imagen enderezada sin recortar).
+/// Corrección de la herramienta Eliminar: un círculo o una pincelada. Coordenadas como las máscaras
+/// (imagen enderezada sin recortar).
 struct HealSpot: Codable, Equatable, Identifiable {
     var id = UUID()
-    var x: Double, y: Double        // destino
-    var sx: Double, sy: Double      // origen
-    var size: Double                // radio relativo al lado largo
+    var x: Double, y: Double        // destino (en una pincelada, el centro de su contorno)
+    var sx: Double, sy: Double      // origen: el destino desplazado por (sx − x, sy − y)
+    var size: Double                // radio relativo al lado largo (grosor del pincel en una pincelada)
     var feather = 50.0
     var opacity = 100.0
     var mode = HealMode.heal
+    /// Pincelada: x0, y0, x1, y1… del destino. Vacío = corrección circular.
+    var points: [Double] = []
+
+    var isStroke: Bool { points.count >= 4 }
+
+    /// Puntos de la pincelada desplazados por (dx, dy).
+    func shiftedPoints(_ dx: Double, _ dy: Double) -> [Double] {
+        points.enumerated().map { $0.offset % 2 == 0 ? $0.element + dx : $0.element + dy }
+    }
 }
 
 struct Photo: Identifiable, Equatable {
@@ -1015,6 +1025,11 @@ extension CIImage {
     func reciprocal() -> CIImage {
         gainBias(1, 0.002).applyingFilter("CIGammaAdjust", parameters: ["inputPower": -1])
     }
+    /// 1 / x exacto donde x ≥ 0,0001 (sin el sesgo de `reciprocal`, para divisiones que deben ser precisas).
+    func safeReciprocal() -> CIImage {
+        applyingFilter("CIColorClamp", parameters: ["inputMinComponents": CIVector(x: 0.0001, y: 0.0001, z: 0.0001, w: 0)])
+            .applyingFilter("CIGammaAdjust", parameters: ["inputPower": -1])
+    }
     func masked(over background: CIImage, mask: CIImage) -> CIImage {
         applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: background, kCIInputMaskImageKey: mask])
     }
@@ -1615,42 +1630,91 @@ final class Engine: @unchecked Sendable {
         return (img, overlay)
     }
 
-    /// Herramienta Eliminar: clona el origen sobre el destino y, en modo Corregir, adapta su tono y luz
-    /// a los alrededores del destino (convolución normalizada para que la mancha no contamine el resultado).
+    private var healRasterCache: [UUID: (key: Int, image: CIImage)] = [:]
+
+    /// Herramienta Eliminar: copia el origen sobre el destino (círculo o pincelada) y, en modo Corregir, lo funde
+    /// con el entorno por Poisson: la luz y el color coinciden exactamente en el borde de la zona y varían con suavidad
+    /// por dentro, así no quedan halos.
     private func applyHeals(_ input: CIImage, _ heals: [HealSpot]) -> CIImage {
         var img = input
         let e = img.extent, W = e.width, H = e.height, long = max(W, H)
-        let white = CIColor(red: 1, green: 1, blue: 1), dark = CIColor(red: 0, green: 0, blue: 0)
         for h in heals {
             let r = max(1, h.size * long)
-            let d = CGPoint(x: h.x * W, y: (1 - h.y) * H), src = CGPoint(x: h.sx * W, y: (1 - h.sy) * H)
-            let region = CGRect(x: d.x - r * 1.5, y: d.y - r * 1.5, width: r * 3, height: r * 3).intersection(e).integral
+            guard let (mask, support) = healMask(h, e, r) else { continue }
+            // Margen para el borde exterior que usa la fusión
+            let region = support.insetBy(dx: -4, dy: -4).intersection(e).integral
             guard !region.isEmpty else { continue }
             let base = img.clampedToExtent()
-            let shifted = base.transformed(by: CGAffineTransform(translationX: d.x - src.x, y: d.y - src.y))
-            var patch = shifted
-            if h.mode == .heal {
-                let sigma = Double(r) * 0.75
-                let area = region.insetBy(dx: -CGFloat(sigma) * 3, dy: -CGFloat(sigma) * 3)
-                guard let outside = CIFilter(name: "CIRadialGradient", parameters: [
-                    kCIInputCenterKey: CIVector(cgPoint: d), "inputRadius0": r, "inputRadius1": r * 1.15,
-                    "inputColor0": dark, "inputColor1": white,
-                ])?.outputImage?.cropped(to: area) else { continue }
-                func lowFreq(_ x: CIImage) -> CIImage { x.cropped(to: area).times(outside).applyingGaussianBlur(sigma: sigma) }
-                let den = outside.applyingGaussianBlur(sigma: sigma).reciprocal()
-                let lfDst = lowFreq(base).times(den), lfSrc = lowFreq(shifted).times(den)
-                let ratio = lfDst.times(lfSrc.reciprocal())
-                    .applyingFilter("CIColorClamp", parameters: ["inputMaxComponents": CIVector(x: 8, y: 8, z: 8, w: 1)])
-                patch = shifted.times(ratio)
-            }
-            guard let mask = CIFilter(name: "CIRadialGradient", parameters: [
-                kCIInputCenterKey: CIVector(cgPoint: d), "inputRadius0": r * (1 - CMath.clamp(h.feather / 100) * 0.8), "inputRadius1": r,
-                "inputColor0": white, "inputColor1": dark,
-            ])?.outputImage else { continue }
+            let shifted = base.transformed(by: CGAffineTransform(translationX: (h.x - h.sx) * W, y: (h.sy - h.y) * H))
+            let patch = h.mode == .heal ? poissonBlend(target: base, source: shifted, mask: mask, region: region) : shifted
             img = patch.cropped(to: region).masked(over: img, mask: mask.gainBias(CMath.clamp(h.opacity / 100), 0).cropped(to: region))
                 .cropped(to: e)
         }
         return img
+    }
+
+    /// Máscara (suave) del destino en píxeles y el rectángulo que ocupa.
+    private func healMask(_ h: HealSpot, _ e: CGRect, _ r: CGFloat) -> (CIImage, CGRect)? {
+        let W = e.width, H = e.height
+        let white = CIColor(red: 1, green: 1, blue: 1), dark = CIColor(red: 0, green: 0, blue: 0)
+        guard h.isStroke else {
+            let d = CGPoint(x: h.x * W, y: (1 - h.y) * H)
+            guard let m = CIFilter(name: "CIRadialGradient", parameters: [
+                kCIInputCenterKey: CIVector(cgPoint: d), "inputRadius0": r * (1 - CMath.clamp(h.feather / 100) * 0.8), "inputRadius1": r,
+                "inputColor0": white, "inputColor1": dark,
+            ])?.outputImage else { return nil }
+            return (m, CGRect(x: d.x - r, y: d.y - r, width: 2 * r, height: 2 * r))
+        }
+        var hasher = Hasher()
+        hasher.combine(h.points); hasher.combine(h.size); hasher.combine(h.feather); hasher.combine(Int(W / H * 1000))
+        let key = hasher.finalize()
+        let raster: CIImage
+        if let c = healRasterCache[h.id], c.key == key {
+            raster = c.image
+        } else {
+            let stroke = BrushStroke(points: h.points, size: h.size, feather: h.feather, flow: 100, erase: false)
+            guard let cg = MaskRaster.brush([stroke], aspect: Double(W / H)) else { return nil }
+            raster = CIImage(cgImage: cg)
+            if healRasterCache.count > 64 { healRasterCache.removeAll() }
+            healRasterCache[h.id] = (key, raster)
+        }
+        let m = raster.transformed(by: CGAffineTransform(scaleX: W / raster.extent.width, y: H / raster.extent.height))
+        let xs = stride(from: 0, to: h.points.count, by: 2).map { h.points[$0] * W }
+        let ys = stride(from: 1, to: h.points.count, by: 2).map { (1 - h.points[$0]) * H }
+        let box = CGRect(x: xs.min()! - r, y: ys.min()! - r, width: xs.max()! - xs.min()! + 2 * r, height: ys.max()! - ys.min()! + 2 * r)
+        return (m, box)
+    }
+
+    /// Fusión de Poisson en el dominio del cociente: el origen se multiplica por un factor que en el borde exterior de la
+    /// zona vale exactamente destino / origen y por dentro es la interpolación más suave posible (membrana).
+    private func poissonBlend(target: CIImage, source: CIImage, mask: CIImage, region: CGRect) -> CIImage {
+        let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0))
+        // Zona que la máscara toca (binaria) y el anillo de 2 px justo fuera de ella
+        let inside = mask.cropped(to: region).composited(over: black).redAsGray(1000, -1).applyingFilter("CIColorClamp")
+            .cropped(to: region)
+        let ring = inside.applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: 2]).cropped(to: region)
+            .times(inside.applyingFilter("CIColorInvert"))
+        let eps: CGFloat = 0.004
+        // Factor limitado a 0,25×…4×: si el borde del origen toca algo muy oscuro, no se dispara
+        let ratio = target.gainBias(1, eps).times(source.gainBias(1, eps).safeReciprocal())
+            .applyingFilter("CIColorClamp", parameters: ["inputMinComponents": CIVector(x: 0.25, y: 0.25, z: 0.25, w: 0),
+                                                         "inputMaxComponents": CIVector(x: 4, y: 4, z: 4, w: 1)])
+            .cropped(to: region)
+        return source.times(membrane(ratio, weight: ring, region: region))
+    }
+
+    /// Interpolación de membrana por pull-push (en la CPU, sobre la zona de la corrección): los píxeles con peso
+    /// conservan su valor y el resto se rellena con suavidad desde una pirámide de medias ponderadas.
+    private func membrane(_ values: CIImage, weight: CIImage, region: CGRect) -> CIImage {
+        let w = Int(region.width), h = Int(region.height)
+        guard w > 0, h > 0 else { return values }
+        var v = [Float](repeating: 0, count: w * h * 4), wt = v
+        ctx.render(values.cropped(to: region), toBitmap: &v, rowBytes: w * 16, bounds: region, format: .RGBAf, colorSpace: nil)
+        ctx.render(weight.cropped(to: region), toBitmap: &wt, rowBytes: w * 16, bounds: region, format: .RGBAf, colorSpace: nil)
+        let filled = PullPush.fill(v, weights: wt, w, h)
+        let data = filled.withUnsafeBufferPointer { Data(buffer: $0) }
+        return CIImage(bitmapData: data, bytesPerRow: w * 16, size: CGSize(width: w, height: h), format: .RGBAf, colorSpace: nil)
+            .transformed(by: CGAffineTransform(translationX: region.minX, y: region.minY))
     }
 
     /// Color medio (sRGB 0…1) de la imagen justo antes de las máscaras, en un punto normalizado de la vista.
@@ -2107,6 +2171,71 @@ enum ImageUtil {
         }
         if let model = tiff[kCGImagePropertyTIFFModel] as? String { parts.insert(model.trimmingCharacters(in: .whitespaces), at: 0) }
         return (parts.joined(separator: "  ·  "), Engine.pixelSize(url))
+    }
+}
+
+/// Pull-push (Gortler et al.): rellena los huecos de una imagen a partir de los píxeles con peso, de forma suave.
+/// Subida: cada nivel es la media ponderada 2×2 del anterior. Bajada: cada píxel mezcla su valor (según su peso)
+/// con el del nivel grueso interpolado. Aproxima la membrana (solución de Laplace) que usa la fusión de Poisson.
+enum PullPush {
+    static func fill(_ values: [Float], weights: [Float], _ w: Int, _ h: Int) -> [Float] {
+        // Nivel 0: RGB y peso (canal rojo del peso)
+        var vs: [[Float]] = [], ws: [[Float]] = [], dims: [(Int, Int)] = []
+        var v0 = [Float](repeating: 0, count: w * h * 3), w0 = [Float](repeating: 0, count: w * h)
+        for i in 0..<(w * h) {
+            let wi = min(1, max(0, weights[i * 4]))
+            w0[i] = wi
+            for c in 0..<3 { v0[i * 3 + c] = values[i * 4 + c] }
+        }
+        vs.append(v0); ws.append(w0); dims.append((w, h))
+        // Subida
+        while dims.last!.0 > 1 || dims.last!.1 > 1 {
+            let (pw, ph) = dims.last!, nw = (pw + 1) / 2, nh = (ph + 1) / 2
+            let pv = vs.last!, pwt = ws.last!
+            var nv = [Float](repeating: 0, count: nw * nh * 3), nwt = [Float](repeating: 0, count: nw * nh)
+            for y in 0..<nh {
+                for x in 0..<nw {
+                    var sw: Float = 0, sr: Float = 0, sg: Float = 0, sb: Float = 0
+                    for dy in 0..<2 {
+                        for dx in 0..<2 {
+                            let fx = 2 * x + dx, fy = 2 * y + dy
+                            guard fx < pw, fy < ph else { continue }
+                            let j = fy * pw + fx, q = pwt[j]
+                            sw += q; sr += q * pv[j * 3]; sg += q * pv[j * 3 + 1]; sb += q * pv[j * 3 + 2]
+                        }
+                    }
+                    let k = y * nw + x
+                    if sw > 0 { nv[k * 3] = sr / sw; nv[k * 3 + 1] = sg / sw; nv[k * 3 + 2] = sb / sw }
+                    nwt[k] = min(1, sw)
+                }
+            }
+            vs.append(nv); ws.append(nwt); dims.append((nw, nh))
+        }
+        // Bajada: del nivel más grueso al original, interpolando el grueso de forma bilineal
+        var cur = vs.last!
+        for l in stride(from: dims.count - 2, through: 0, by: -1) {
+            let (fw, fh) = dims[l], (cw, ch) = dims[l + 1]
+            var next = vs[l]
+            let fwt = ws[l]
+            for y in 0..<fh {
+                let cy = min(max((Float(y) + 0.5) / 2 - 0.5, 0), Float(ch - 1))
+                let y0 = Int(cy), y1 = min(y0 + 1, ch - 1), ty = cy - Float(y0)
+                for x in 0..<fw {
+                    let cx = min(max((Float(x) + 0.5) / 2 - 0.5, 0), Float(cw - 1))
+                    let x0 = Int(cx), x1 = min(x0 + 1, cw - 1), tx = cx - Float(x0)
+                    let k = y * fw + x, a = fwt[k]
+                    for c in 0..<3 {
+                        let top = cur[(y0 * cw + x0) * 3 + c] * (1 - tx) + cur[(y0 * cw + x1) * 3 + c] * tx
+                        let bot = cur[(y1 * cw + x0) * 3 + c] * (1 - tx) + cur[(y1 * cw + x1) * 3 + c] * tx
+                        next[k * 3 + c] = a * next[k * 3 + c] + (1 - a) * (top * (1 - ty) + bot * ty)
+                    }
+                }
+            }
+            cur = next
+        }
+        var out = [Float](repeating: 1, count: w * h * 4)
+        for i in 0..<(w * h) { for c in 0..<3 { out[i * 4 + c] = cur[i * 3 + c] } }
+        return out
     }
 }
 
@@ -2602,6 +2731,7 @@ final class Store: ObservableObject {
         tool = .none
         selectedMaskID = nil
         selectedHealID = nil
+        clearHealSource()
         selectedPointID = nil
         showPointRange = false
         disabledGroups = []
@@ -3222,15 +3352,58 @@ final class Store: ObservableObject {
         })
     }
 
+    /// Origen fijado con ⌥-clic (como el pincel corrector de Photoshop) y el desplazamiento alineado que fija la
+    /// primera corrección hecha con él: las siguientes usan el mismo desplazamiento.
+    @Published var healSourceAnchor: CGPoint?
+    private var healAlignedOffset: (Double, Double)?
+
+    func setHealSource(_ x: Double, _ y: Double) {
+        healSourceAnchor = CGPoint(x: x, y: y)
+        healAlignedOffset = nil
+    }
+
+    func clearHealSource() {
+        healSourceAnchor = nil
+        healAlignedOffset = nil
+    }
+
+    /// Origen para un destino: el fijado con ⌥-clic (alineado) o el que se busca solo.
+    private func healSource(_ x: Double, _ y: Double, radius: Double) -> (Double, Double) {
+        if let a = healSourceAnchor {
+            let off = healAlignedOffset ?? (Double(a.x) - x, Double(a.y) - y)
+            healAlignedOffset = off
+            return (x + off.0, y + off.1)
+        }
+        let asp = imageAspect
+        let fallback = (x + (x > 0.5 ? -1 : 1) * radius * 2.6 * (asp >= 1 ? 1 : 1 / asp), y)
+        return findHealSource(x, y, radius) ?? fallback
+    }
+
     func addHeal(at x: Double, _ y: Double) {
         let size = healSize / 1000
-        let a = imageAspect
-        let fallback = (x + (x > 0.5 ? -1 : 1) * size * 2.6 * (a >= 1 ? 1 : 1 / a), y)
-        let src = findHealSource(x, y, size) ?? fallback
+        let src = healSource(x, y, radius: size)
         let spot = HealSpot(x: x, y: y, sx: src.0, sy: src.1, size: size, feather: healFeather, opacity: healOpacity, mode: healMode)
         settings.heals.append(spot)
         selectedHealID = spot.id
         commit(healMode == .heal ? "Corregir" : "Clonar")
+    }
+
+    /// Pincelada sobre una mancha alargada (cable, pelo, grieta): el origen se busca para todo su contorno.
+    func addHealStroke(_ points: [Double]) {
+        guard points.count >= 4 else { return }
+        let size = healSize / 1000
+        let xs = stride(from: 0, to: points.count, by: 2).map { points[$0] }
+        let ys = stride(from: 1, to: points.count, by: 2).map { points[$0] }
+        let cx = (xs.min()! + xs.max()!) / 2, cy = (ys.min()! + ys.max()!) / 2
+        // Radio del contorno en unidades del lado largo, para buscar el origen fuera de él
+        let asp = imageAspect
+        let bw = (xs.max()! - xs.min()!) * (asp >= 1 ? 1 : asp), bh = (ys.max()! - ys.min()!) / (asp >= 1 ? asp : 1)
+        let src = healSource(cx, cy, radius: max(bw, bh) / 2 + size)
+        let spot = HealSpot(x: cx, y: cy, sx: src.0, sy: src.1, size: size, feather: healFeather, opacity: healOpacity,
+                            mode: healMode, points: points)
+        settings.heals.append(spot)
+        selectedHealID = spot.id
+        commit(healMode == .heal ? "Corregir (pincel)" : "Clonar (pincel)")
     }
 
     func updateHeal(_ h: HealSpot) {
@@ -4864,8 +5037,19 @@ struct HealPanel: View {
             LRSlider("Desvanecer", store.healBinding(\.feather, \.healFeather), 0...100, def: 50)
             LRSlider("Opacidad", store.healBinding(\.opacity, \.healOpacity), 0...100, def: 100)
             Toggle("Mostrar puntos (H)", isOn: $store.showHealSpots).toggleStyle(MonoCheckbox()).padding(.top, 2)
-            HintText("Haz clic sobre una mancha para eliminarla: el origen se elige solo. Arrastra el círculo discontinuo para usar otro origen. ⌫ borra la seleccionada.")
+            HintText("Clic sobre una mancha: corrección circular. Arrastra para pintar sobre manchas alargadas (cables, pelos, grietas). El origen se elige solo; arrastra el contorno discontinuo para cambiarlo. ⌫ borra la seleccionada.")
                 .padding(.top, 2)
+            if store.healSourceAnchor != nil {
+                HStack {
+                    Marker()
+                    Text(tr("Origen fijado (⌥-clic): las siguientes correcciones lo usan alineado."))
+                        .font(.system(size: 10.5)).foregroundColor(Theme.text).fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    SmallButton("Quitar") { store.clearHealSource() }
+                }
+            } else {
+                HintText("⌥-clic en la foto fija el origen a mano, como el pincel corrector de Photoshop.")
+            }
             HStack {
                 Text(store.settings.heals.isEmpty ? tr("Sin correcciones") : tr("%@ correcciones", "\(store.settings.heals.count)"))
                     .font(.system(size: 10.5)).foregroundColor(Theme.secondary)
@@ -4880,27 +5064,49 @@ struct HealPanel: View {
     }
 }
 
-/// Superposición de la herramienta Eliminar: puntos de destino (continuos) y de origen (discontinuos).
+/// Superposición de la herramienta Eliminar: destinos (continuos) y orígenes (discontinuos), círculos o pinceladas.
+/// Clic = corrección circular · arrastrar en vacío = pincelada · ⌥-clic = fijar el origen a mano.
 struct HealOverlay: View {
     @EnvironmentObject var store: Store
     @Local private var mode: Mode?
     @Local private var start: HealSpot?
     @Local private var hover: CGPoint?
+    @Local private var stroke: [CGPoint] = []
 
-    enum Mode: Equatable { case dest, source, create }
+    enum Mode: Equatable { case dest, source, create, paint, anchor }
 
     var body: some View {
         GeometryReader { g in
             let size = g.size
             let s = store.settings
             let preLong = max(size.width / s.cropW, size.height / s.cropH)
+            let r = store.healSize / 1000 * preLong
             ZStack {
                 Canvas { ctx, sz in
-                    guard store.showHealSpots else { return }
-                    for h in s.heals { draw(ctx, h, selected: h.id == store.selectedHealID, s, sz, preLong) }
+                    if store.showHealSpots {
+                        for h in s.heals { draw(ctx, h, selected: h.id == store.selectedHealID, s, sz, preLong) }
+                    }
+                    // Pincelada en curso
+                    if mode == .paint, stroke.count > 1 {
+                        let path = Path { p in p.addLines(stroke) }
+                        ctx.stroke(path, with: .color(.white.opacity(0.22)), style: StrokeStyle(lineWidth: r * 2, lineCap: .round, lineJoin: .round))
+                        ctx.stroke(path.strokedPath(StrokeStyle(lineWidth: r * 2, lineCap: .round, lineJoin: .round)),
+                                   with: .color(.white), lineWidth: 1)
+                    }
+                    // Origen fijado con ⌥-clic
+                    if let a = store.healSourceAnchor {
+                        let c = viewPoint(Double(a.x), Double(a.y), s, sz)
+                        let cross = Path { p in
+                            p.move(to: CGPoint(x: c.x - 9, y: c.y)); p.addLine(to: CGPoint(x: c.x + 9, y: c.y))
+                            p.move(to: CGPoint(x: c.x, y: c.y - 9)); p.addLine(to: CGPoint(x: c.x, y: c.y + 9))
+                        }
+                        ctx.stroke(cross, with: .color(.black.opacity(0.6)), lineWidth: 3)
+                        ctx.stroke(cross, with: .color(Theme.accent), lineWidth: 1.5)
+                        ctx.stroke(Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r)),
+                                   with: .color(Theme.accent), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    }
                 }
-                if let h = hover, mode == nil || mode == .create {
-                    let r = store.healSize / 1000 * preLong
+                if let h = hover, mode == nil || mode == .create || mode == .paint {
                     Circle().stroke(Color.white, lineWidth: 1).frame(width: r * 2, height: r * 2).position(h)
                         .shadow(color: .black.opacity(0.6), radius: 1)
                 }
@@ -4913,14 +5119,23 @@ struct HealOverlay: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { v in drag(v, size, preLong) }
                     .onEnded { v in
-                        if mode == .create {
+                        switch mode {
+                        case .create:
                             let p = imagePoint(v.location, store.settings, size)
                             store.addHeal(at: p.0, p.1)
-                        } else if mode != nil {
+                        case .paint:
+                            store.addHealStroke(stroke.flatMap { pt -> [Double] in
+                                let q = imagePoint(pt, store.settings, size)
+                                return [q.0, q.1]
+                            })
+                        case .dest, .source:
                             store.commit("Mover corrección")
+                        default:
+                            break
                         }
                         mode = nil
                         start = nil
+                        stroke = []
                     }
             )
         }
@@ -4929,10 +5144,19 @@ struct HealOverlay: View {
     private func draw(_ ctx: GraphicsContext, _ h: HealSpot, selected: Bool, _ s: EditSettings, _ size: CGSize, _ preLong: CGFloat) {
         let r = h.size * preLong
         let d = viewPoint(h.x, h.y, s, size), src = viewPoint(h.sx, h.sy, s, size)
-        let dest = Path(ellipseIn: CGRect(x: d.x - r, y: d.y - r, width: r * 2, height: r * 2))
         let shadow = GraphicsContext.Shading.color(.black.opacity(0.5))
+        // Contorno del destino y del origen: círculo o pincelada (el origen es el destino desplazado)
+        func outline(_ dx: CGFloat, _ dy: CGFloat) -> Path {
+            guard h.isStroke else { return Path(ellipseIn: CGRect(x: d.x + dx - r, y: d.y + dy - r, width: r * 2, height: r * 2)) }
+            let pts = stride(from: 0, to: h.points.count - 1, by: 2).map {
+                let v = viewPoint(h.points[$0], h.points[$0 + 1], s, size)
+                return CGPoint(x: v.x + dx, y: v.y + dy)
+            }
+            return Path { p in p.addLines(pts) }.strokedPath(StrokeStyle(lineWidth: r * 2, lineCap: .round, lineJoin: .round))
+        }
+        let dest = outline(0, 0)
         if selected {
-            let source = Path(ellipseIn: CGRect(x: src.x - r, y: src.y - r, width: r * 2, height: r * 2))
+            let source = outline(src.x - d.x, src.y - d.y)
             let dx = d.x - src.x, dy = d.y - src.y, len = max(1, hypot(dx, dy))
             if len > r * 2 {
                 let a = CGPoint(x: src.x + dx / len * r, y: src.y + dy / len * r), b = CGPoint(x: d.x - dx / len * r, y: d.y - dy / len * r)
@@ -4948,28 +5172,64 @@ struct HealOverlay: View {
         }
     }
 
+    /// ¿Está el punto de la vista sobre la corrección (desplazada dx, dy en coordenadas de imagen)?
+    private func hits(_ h: HealSpot, _ p: CGPoint, _ dx: Double, _ dy: Double, _ s: EditSettings, _ size: CGSize, _ preLong: CGFloat) -> Bool {
+        let r = max(h.size * preLong, 8)
+        guard h.isStroke else {
+            let c = viewPoint(h.x + dx, h.y + dy, s, size)
+            return hypot(c.x - p.x, c.y - p.y) <= r
+        }
+        let pts = stride(from: 0, to: h.points.count - 1, by: 2).map { viewPoint(h.points[$0] + dx, h.points[$0 + 1] + dy, s, size) }
+        for (a, b) in zip(pts, pts.dropFirst()) {
+            let abx = b.x - a.x, aby = b.y - a.y, l2 = max(1e-6, abx * abx + aby * aby)
+            let t = min(max(((p.x - a.x) * abx + (p.y - a.y) * aby) / l2, 0), 1)
+            if hypot(a.x + abx * t - p.x, a.y + aby * t - p.y) <= r { return true }
+        }
+        return false
+    }
+
     private func drag(_ v: DragGesture.Value, _ size: CGSize, _ preLong: CGFloat) {
         let s = store.settings
         hover = v.location
         if mode == nil {
-            mode = .create
             let p = v.startLocation
-            func inside(_ x: Double, _ y: Double, _ r: CGFloat) -> Bool {
-                let c = viewPoint(x, y, s, size)
-                return hypot(c.x - p.x, c.y - p.y) <= max(r, 8)
+            // ⌥-clic: fijar el origen a mano para las siguientes correcciones
+            if NSEvent.modifierFlags.contains(.option) {
+                let q = imagePoint(p, s, size)
+                store.setHealSource(q.0, q.1)
+                mode = .anchor
+                return
             }
+            mode = .create
             if store.showHealSpots {
-                if let sel = s.heals.first(where: { $0.id == store.selectedHealID }), inside(sel.sx, sel.sy, sel.size * preLong) {
+                if let sel = s.heals.first(where: { $0.id == store.selectedHealID }),
+                   hits(sel, p, sel.sx - sel.x, sel.sy - sel.y, s, size, preLong) {
                     mode = .source; start = sel
-                } else if let hit = s.heals.last(where: { inside($0.x, $0.y, $0.size * preLong) }) {
+                } else if let hit = s.heals.last(where: { hits($0, p, 0, 0, s, size, preLong) }) {
                     store.selectedHealID = hit.id
                     mode = .dest; start = hit
                 }
             }
         }
-        guard let mode, mode != .create, var h = start else { return }
+        // Arrastrar desde una zona vacía pinta una pincelada
+        if mode == .create, hypot(v.translation.width, v.translation.height) > 4 {
+            mode = .paint
+            stroke = [v.startLocation]
+        }
+        if mode == .paint {
+            if let last = stroke.last, hypot(last.x - v.location.x, last.y - v.location.y) > 2 { stroke.append(v.location) }
+            return
+        }
+        guard let mode, mode == .dest || mode == .source, var h = start else { return }
         let p = imagePoint(v.location, s, size), p0 = imagePoint(v.startLocation, s, size)
-        if mode == .dest { h.x += p.0 - p0.0; h.y += p.1 - p0.1 } else { h.sx += p.0 - p0.0; h.sy += p.1 - p0.1 }
+        let dx = p.0 - p0.0, dy = p.1 - p0.1
+        if mode == .dest {
+            // Mover el destino arrastra también la pincelada; el origen se queda donde estaba
+            h.x += dx; h.y += dy
+            if h.isStroke { h.points = h.shiftedPoints(dx, dy) }
+        } else {
+            h.sx += dx; h.sy += dy
+        }
         store.updateHeal(h)
     }
 }

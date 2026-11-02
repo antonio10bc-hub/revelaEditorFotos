@@ -98,7 +98,9 @@
 "Clic derecho en la miniatura ▸ Localizar…" = "Right-click the thumbnail ▸ Locate…";
 "Clic para ampliar ahí · arrastra para desplazarte" = "Click to zoom there · drag to pan";
 "Clic para añadir un punto · arrastra fuera del gráfico para eliminarlo" = "Click to add a point · drag it off the graph to remove it";
+"Clic sobre una mancha: corrección circular. Arrastra para pintar sobre manchas alargadas (cables, pelos, grietas). El origen se elige solo; arrastra el contorno discontinuo para cambiarlo. ⌫ borra la seleccionada." = "Click a spot: circular fix. Drag to paint over long blemishes (cables, hairs, cracks). The source is picked automatically; drag the dashed outline to change it. ⌫ deletes the selected one.";
 "Clonar" = "Clone";
+"Clonar (pincel)" = "Clone (brush)";
 "Color" = "Color";
 "Color de máscara" = "Mask color";
 "Como se tomó" = "As Shot";
@@ -109,6 +111,7 @@
 "Correcciones de perfil" = "Profile corrections";
 "Corrección seleccionada" = "Selected spot";
 "Corregir" = "Heal";
+"Corregir (pincel)" = "Heal (brush)";
 "Crea una máscara en el panel derecho" = "Create a mask in the right panel";
 "Crear nueva máscara" = "Create new mask";
 "Curva de tonos" = "Tone Curve";
@@ -345,6 +348,7 @@
 "Opacidad" = "Opacity";
 "Orientación" = "Orientation";
 "Orientación del recorte" = "Crop orientation";
+"Origen fijado (⌥-clic): las siguientes correcciones lo usan alineado." = "Source set (⌥-click): the next fixes use it, aligned.";
 "Original" = "Original";
 "Original + sufijo" = "Original + suffix";
 "Oscuros" = "Darks";
@@ -373,6 +377,7 @@
 "Punto medio" = "Midpoint";
 "Púrpura" = "Purple";
 "Quemado" = "Clipped";
+"Quitar" = "Clear";
 "Quitar como referencia" = "Remove as reference";
 "Quitar del catálogo" = "Remove from catalog";
 "Quitar inversión" = "Remove inversion";
@@ -480,4 +485,5 @@
 "⌥ + arrastrar" = "⌥ + drag";
 "⌥ + arrastrar una esquina o un borde: recorte simétrico desde el centro." = "⌥ + drag a corner or edge: symmetric crop from the center.";
 "⌥ + esquina" = "⌥ + corner";
+"⌥-clic en la foto fija el origen a mano, como el pincel corrector de Photoshop." = "⌥-click on the photo to set the source by hand, like Photoshop's healing brush.";
 "⌥-clic: abrir solo este panel" = "⌥-click: open only this panel";

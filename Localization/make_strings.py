@@ -157,6 +157,11 @@ EN = {
     "Restablecer un deslizador": "Reset a slider", "Z / espacio": "Z / space", "⌥ + arrastrar": "⌥ + drag",
     "⇧⌘I  ·  o arrástralas a la ventana": "⇧⌘I  ·  or drag them into the window", "⌘ / ⇧ + clic": "⌘ / ⇧ + click",
     "Hecho": "Done", "Manchas": "Spots", "Orientación": "Orientation",
+    "Clic sobre una mancha: corrección circular. Arrastra para pintar sobre manchas alargadas (cables, pelos, grietas). El origen se elige solo; arrastra el contorno discontinuo para cambiarlo. ⌫ borra la seleccionada.":
+        "Click a spot: circular fix. Drag to paint over long blemishes (cables, hairs, cracks). The source is picked automatically; drag the dashed outline to change it. ⌫ deletes the selected one.",
+    "Clonar (pincel)": "Clone (brush)", "Corregir (pincel)": "Heal (brush)", "Quitar": "Clear",
+    "Origen fijado (⌥-clic): las siguientes correcciones lo usan alineado.": "Source set (⌥-click): the next fixes use it, aligned.",
+    "⌥-clic en la foto fija el origen a mano, como el pincel corrector de Photoshop.": "⌥-click on the photo to set the source by hand, like Photoshop's healing brush.",
     "⌥ + arrastrar una esquina o un borde: recorte simétrico desde el centro.": "⌥ + drag a corner or edge: symmetric crop from the center.",
     "⌥ + esquina": "⌥ + corner", "Recorte simétrico desde el centro": "Symmetric crop from the center",
     # Monitores, falso color, lupa y evaluación de color
