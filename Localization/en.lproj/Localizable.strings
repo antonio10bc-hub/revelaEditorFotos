@@ -9,6 +9,7 @@
 "%@ marcadas" = "%@ marked";
 "%@ no encontradas" = "%@ missing";
 "%@ ppp" = "%@ ppi";
+"1 / 2" = "1 / 2";
 "1 x 1" = "1 x 1";
 "2 x 3" = "2 x 3";
 "3 vías" = "3-way";
@@ -361,6 +362,7 @@
 "Oscuros" = "Darks";
 "Paisaje" = "Landscape";
 "Paisaje dramático" = "Dramatic landscape";
+"Panel anterior / siguiente" = "Previous / next panel";
 "Paneles desactivados: vista previa parcial" = "Panels disabled: partial preview";
 "Param." = "Param.";
 "Pegar ajustes" = "Paste settings";

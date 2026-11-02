@@ -2496,6 +2496,14 @@ let wbPresets = [
     WBPreset(name: "Fluorescente", kelvin: 3800, tint: 21), WBPreset(name: "Flash", kelvin: 5500, tint: 0),
 ]
 
+/// Posición vertical de cada panel de revelado dentro del panel derecho (para saltar entre ellos con 1 y 2).
+struct PanelOffsetsKey: PreferenceKey {
+    static let defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
 /// Imágenes que llegan del revelado. Separadas del Store para que su llegada no redibuje los paneles.
 final class PreviewModel: ObservableObject {
     @Published var preview: CGImage?
@@ -3659,6 +3667,23 @@ final class Store: ObservableObject {
         }
     }
 
+    // MARK: Saltar entre paneles (1 y 2)
+
+    /// Posición de cada panel de revelado respecto a lo alto del panel derecho (sin publicar: no redibuja nada).
+    var panelOffsets: [String: CGFloat] = [:]
+    @Published var panelScrollID: String?
+    @Published var panelScrollToken = 0
+
+    /// Coloca arriba del todo el panel siguiente (2) o el anterior (1) al que está ahora en lo alto.
+    func jumpPanel(_ dir: Int) {
+        guard module == .develop, tool != .mask, tool != .heal, !panelsHidden else { return }
+        let sorted = panelOffsets.sorted { $0.value < $1.value }
+        let target = dir > 0 ? sorted.first { $0.value > 1 } : sorted.last { $0.value < -1 }
+        guard let t = target else { return }
+        panelScrollID = t.key
+        panelScrollToken += 1
+    }
+
     // MARK: Rueda, trackpad y deslizadores
 
     /// Deslizador bajo el ratón: la rueda y las flechas ↑↓ lo ajustan.
@@ -3812,6 +3837,8 @@ final class Store: ObservableObject {
         case "f": falseColor.toggle()
         case "l": loupe.toggle()
         case "c": colorAssess.toggle()
+        case "1": jumpPanel(-1)
+        case "2": jumpPanel(1)
         case "q": toggleTool(.heal)
         case "h": if tool == .heal { showHealSpots.toggle() } else { return false }
         case "?", "/": showShortcuts.toggle()
@@ -4496,6 +4523,11 @@ struct PanelSection<Content: View>: View {
             }
             Rectangle().fill(Theme.separator).frame(height: 1)
         }
+        .id(title)
+        .background(GeometryReader { g in
+            Color.clear.preference(key: PanelOffsetsKey.self,
+                                   value: Self.developTitles.contains(title) ? [title: g.frame(in: .named("rightPanelScroll")).minY] : [:])
+        })
     }
 
     /// Clic: abre o cierra. ⌥-clic (o modo solo) deja abierto solo este panel.
@@ -4868,7 +4900,7 @@ struct RightPanel: View {
             case .crop:
                 ToolBlock("Recortar y enderezar", icon: "crop", onDone: { store.tool = .none }) { CropPanel() }
                 SectionDivider("Ajustes de la foto")
-                ScrollView { globalPanels }
+                panelsScroll
             case .mask:
                 ToolBlock("Máscaras", icon: "circle.dashed.inset.filled", onDone: { store.tool = .none }) {
                     ScrollView { MaskPanel().padding(.top, 6) }
@@ -4880,7 +4912,7 @@ struct RightPanel: View {
                 }
                 .transition(.opacity)
             default:
-                ScrollView { globalPanels }.transition(.opacity)
+                panelsScroll.transition(.opacity)
             }
             HStack(spacing: 8) {
                 Button("Anterior") { store.pastePrevious() }.help("Aplica los ajustes de la foto anterior (⌥⌘V)")
@@ -4894,6 +4926,21 @@ struct RightPanel: View {
         .animation(.easeInOut(duration: 0.18), value: store.tool)
         .disabled(store.current == nil)
         .background(Theme.panel)
+    }
+
+    /// Paneles de revelado con desplazamiento; 1 y 2 colocan el panel anterior o siguiente arriba del todo.
+    private var panelsScroll: some View {
+        ScrollViewReader { proxy in
+            ScrollView { globalPanels }
+                .coordinateSpace(name: "rightPanelScroll")
+                .onPreferenceChange(PanelOffsetsKey.self) { store.panelOffsets = $0 }
+                .onChange(of: store.panelScrollToken) { _, _ in
+                    guard let id = store.panelScrollID else { return }
+                    var t = Transaction()
+                    t.disablesAnimations = true
+                    withTransaction(t) { proxy.scrollTo(id, anchor: .top) }
+                }
+        }
     }
 
     private var globalPanels: some View {
@@ -7251,7 +7298,7 @@ struct ShortcutsSheet: View {
     @Environment(\.dismiss) private var dismiss
     private let groups: [(String, [(String, String)])] = [
         ("Herramientas", [("R", "Recortar y enderezar"), ("Q", "Eliminar manchas"), ("M", "Máscaras"), ("W", "Balance de blancos"),
-                          ("O", "Superposición de máscara"), ("⌥ + esquina", "Recorte simétrico desde el centro"), ("H", "Mostrar puntos de corrección"), ("X", "Orientación del recorte"),
+                          ("O", "Superposición de máscara"), ("⌥ + esquina", "Recorte simétrico desde el centro"), ("1 / 2", "Panel anterior / siguiente"), ("H", "Mostrar puntos de corrección"), ("X", "Orientación del recorte"),
                           ("↩ / Esc", "Cerrar herramienta"), ("⌫", "Borrar máscara o corrección")]),
         ("Vista", [("Z / espacio", "Zoom 1:1"), ("\\", "Antes"), ("Y", "Antes / después dividido"), ("J", "Aviso de recorte"), ("F", "Falso color"), ("L", "Lupa"), ("C", "Evaluación de color"),
                    ("Tab", "Ocultar paneles"), ("G / D", "Biblioteca / Revelar"), ("← →", "Foto anterior / siguiente"),
