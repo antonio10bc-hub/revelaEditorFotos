@@ -98,7 +98,7 @@
 "Clic derecho en la miniatura ▸ Localizar…" = "Right-click the thumbnail ▸ Locate…";
 "Clic para ampliar ahí · arrastra para desplazarte" = "Click to zoom there · drag to pan";
 "Clic para añadir un punto · arrastra fuera del gráfico para eliminarlo" = "Click to add a point · drag it off the graph to remove it";
-"Clic sobre una mancha: corrección circular. Arrastra para pintar sobre manchas alargadas (cables, pelos, grietas). El origen se elige solo; arrastra el contorno discontinuo para cambiarlo. ⌫ borra la seleccionada." = "Click a spot: circular fix. Drag to paint over long blemishes (cables, hairs, cracks). The source is picked automatically; drag the dashed outline to change it. ⌫ deletes the selected one.";
+"Clic sobre una mancha: corrección circular. Arrastra para pintar sobre manchas alargadas (cables, pelos, grietas). El origen se elige solo; arrastra el contorno discontinuo para cambiarlo. La rueda cambia el tamaño. ⌫ borra la seleccionada." = "Click a spot: circular fix. Drag to paint over long blemishes (cables, hairs, cracks). The source is picked automatically; drag the dashed outline to change it. Scroll to change the size. ⌫ deletes the selected one.";
 "Clonar" = "Clone";
 "Clonar (pincel)" = "Clone (brush)";
 "Color" = "Color";
@@ -443,6 +443,7 @@
 "Superposición de máscara" = "Mask overlay";
 "TIFF 16 bits" = "16-bit TIFF";
 "Tamaño" = "Size";
+"Tamaño de corrección" = "Spot size";
 "Tamaño de imagen" = "Image size";
 "Tamaño original" = "Original size";
 "Teal & Orange" = "Teal & Orange";

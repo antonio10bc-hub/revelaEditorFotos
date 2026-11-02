@@ -3342,6 +3342,13 @@ final class Store: ObservableObject {
         })
     }
 
+    /// Tamaño (1…100) del pincel de la herramienta activa, si tiene pincel: lo cambia la rueda sobre la foto.
+    var activeBrushSize: Binding<Double>? {
+        if tool == .mask, selectedMask?.kind == .brush { return Binding(get: { self.brushSize }, set: { self.brushSize = $0 }) }
+        if tool == .heal { return healBinding(\.size, \.healSize, scale: 1000) }
+        return nil
+    }
+
     var healModeBinding: Binding<HealMode> {
         Binding(get: { self.healIndex.map { self.settings.heals[$0].mode } ?? self.healMode }, set: { m in
             self.healMode = m
@@ -3658,8 +3665,8 @@ final class Store: ObservableObject {
                 return true
             }
         }
-        // Pincel de máscara activo: la rueda sobre la foto cambia su tamaño
-        if e.type == .scrollWheel, module == .develop, tool == .mask, selectedMask?.kind == .brush, let win = e.window {
+        // Herramientas de pincel (máscara de pincel, Eliminar): la rueda sobre la foto cambia el tamaño
+        if e.type == .scrollWheel, module == .develop, let win = e.window, let brush = activeBrushSize {
             let loc = CGPoint(x: e.locationInWindow.x, y: (win.contentView?.bounds.height ?? 0) - e.locationInWindow.y)
             if canvasFrame.contains(loc) {
                 if e.momentumPhase != [] { return true }
@@ -3669,7 +3676,14 @@ final class Store: ObservableObject {
                 let steps = wheelAccum.rounded(.towardZero)
                 if steps != 0 {
                     wheelAccum -= steps
-                    brushSize = min(max(brushSize + steps, 1), 100)
+                    brush.wrappedValue = min(max((brush.wrappedValue + steps).rounded(), 1), 100)
+                    // Si cambia una corrección ya hecha, queda en el historial al terminar de girar
+                    if tool == .heal, selectedHealID != nil {
+                        wheelCommit?.cancel()
+                        let w = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.commit("Tamaño de corrección") } }
+                        wheelCommit = w
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: w)
+                    }
                 }
                 return true
             }
@@ -5037,7 +5051,7 @@ struct HealPanel: View {
             LRSlider("Desvanecer", store.healBinding(\.feather, \.healFeather), 0...100, def: 50)
             LRSlider("Opacidad", store.healBinding(\.opacity, \.healOpacity), 0...100, def: 100)
             Toggle("Mostrar puntos (H)", isOn: $store.showHealSpots).toggleStyle(MonoCheckbox()).padding(.top, 2)
-            HintText("Clic sobre una mancha: corrección circular. Arrastra para pintar sobre manchas alargadas (cables, pelos, grietas). El origen se elige solo; arrastra el contorno discontinuo para cambiarlo. ⌫ borra la seleccionada.")
+            HintText("Clic sobre una mancha: corrección circular. Arrastra para pintar sobre manchas alargadas (cables, pelos, grietas). El origen se elige solo; arrastra el contorno discontinuo para cambiarlo. La rueda cambia el tamaño. ⌫ borra la seleccionada.")
                 .padding(.top, 2)
             if store.healSourceAnchor != nil {
                 HStack {
