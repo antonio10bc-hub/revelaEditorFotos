@@ -13,6 +13,43 @@ import ImageIO
 import UniformTypeIdentifiers
 import Vision
 
+// MARK: - Idioma
+
+/// Traduce un texto de la interfaz. El español es el idioma base (las claves); el inglés está en
+/// en.lproj/Localizable.strings. Los textos fijos de SwiftUI se traducen solos; los que llegan como String pasan por aquí.
+func tr(_ s: String) -> String { Bundle.main.localizedString(forKey: s, value: s, table: nil) }
+
+/// Traduce un formato con `%@` y lo rellena (pasa los valores ya como texto).
+func tr(_ format: String, _ args: CVarArg...) -> String { String(format: tr(format), arguments: args) }
+
+enum AppLanguage: String, CaseIterable, Identifiable {
+    case es, en
+    var id: String { rawValue }
+    var name: String { self == .es ? "Español" : "English" }
+
+    /// Idioma en uso: el elegido en la app o, si no, el preferido del sistema entre los disponibles.
+    static var current: AppLanguage {
+        let pref = Bundle.main.preferredLocalizations.first ?? "es"
+        return pref.hasPrefix("en") ? .en : .es
+    }
+
+    /// Guarda el idioma (se aplica al reiniciar) y ofrece reiniciar ya.
+    static func choose(_ l: AppLanguage) {
+        guard l != current else { return }
+        UserDefaults.standard.set([l.rawValue], forKey: "AppleLanguages")
+        let a = NSAlert()
+        a.messageText = l == .en ? "Restart Revela to switch to English?" : "¿Reiniciar Revela para cambiar a español?"
+        a.addButton(withTitle: l == .en ? "Restart now" : "Reiniciar ahora")
+        a.addButton(withTitle: l == .en ? "Later" : "Más tarde")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "sleep 0.6; open \"\(Bundle.main.bundlePath)\""]
+        try? p.run()
+        NSApp.terminate(nil)
+    }
+}
+
 // MARK: - Tema
 
 enum Theme {
@@ -2290,8 +2327,8 @@ final class Store: ObservableObject {
         p.allowsMultipleSelection = true
         p.canChooseDirectories = true
         p.allowedContentTypes = [.image, .rawImage]
-        p.prompt = "Importar"
-        p.message = "Elige fotos (RAW, JPEG, HEIC, TIFF, PNG…) o carpetas"
+        p.prompt = tr("Importar")
+        p.message = tr("Elige fotos (RAW, JPEG, HEIC, TIFF, PNG…) o carpetas")
         if p.runModal() == .OK { add(urls: p.urls) }
     }
 
@@ -2533,7 +2570,7 @@ final class Store: ObservableObject {
         var h = histories[id] ?? HistoryState(entries: [HistoryEntry(name: "Importar", settings: settings)], index: 0)
         guard h.entries[h.index].settings != settings else { return }
         h.entries = Array(h.entries.prefix(h.index + 1))
-        h.entries.append(HistoryEntry(name: name, settings: settings))
+        h.entries.append(HistoryEntry(name: tr(name), settings: settings))
         h.index = h.entries.count - 1
         histories[id] = h
         thumbDirty = true
@@ -2546,7 +2583,7 @@ final class Store: ObservableObject {
         guard let i = photos.firstIndex(where: { $0.id == id }) else { return }
         var h = histories[id] ?? HistoryState(entries: [HistoryEntry(name: "Importar", settings: photos[i].settings)], index: 0)
         h.entries = Array(h.entries.prefix(h.index + 1))
-        h.entries.append(HistoryEntry(name: name, settings: s))
+        h.entries.append(HistoryEntry(name: tr(name), settings: s))
         h.index = h.entries.count - 1
         histories[id] = h
         photos[i].settings = s
@@ -2580,7 +2617,7 @@ final class Store: ObservableObject {
         guard s != settings else { return }
         settings = s
         disabledGroups.remove(g)
-        commit("Restablecer \(name)")
+        commit(tr("Restablecer %@", name))
     }
 
     func toggleGroup(_ g: AdjustGroup) {
@@ -2615,17 +2652,17 @@ final class Store: ObservableObject {
 
     func saveUserPreset() {
         let a = NSAlert()
-        a.messageText = "Nuevo ajuste preestablecido"
-        a.informativeText = "Guarda los ajustes actuales (sin recorte ni geometría)."
+        a.messageText = tr("Nuevo ajuste preestablecido")
+        a.informativeText = tr("Guarda los ajustes actuales (sin recorte ni geometría).")
         let tf = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        tf.stringValue = "Mi ajuste \(userPresets.count + 1)"
+        tf.stringValue = tr("Mi ajuste %@", "\(userPresets.count + 1)")
         a.accessoryView = tf
-        a.addButton(withTitle: "Guardar")
-        a.addButton(withTitle: "Cancelar")
+        a.addButton(withTitle: tr("Guardar"))
+        a.addButton(withTitle: tr("Cancelar"))
         a.window.initialFirstResponder = tf
         guard a.runModal() == .alertFirstButtonReturn else { return }
         let name = tf.stringValue.trimmingCharacters(in: .whitespaces)
-        userPresets.append(UserPreset(name: name.isEmpty ? "Sin nombre" : name, settings: settings))
+        userPresets.append(UserPreset(name: name.isEmpty ? tr("Sin nombre") : name, settings: settings))
         saveCatalogSoon()
     }
 
@@ -2678,7 +2715,7 @@ final class Store: ObservableObject {
         guard let shot = current?.asShot else { return }
         settings.temp = CMath.clamp((60 * log2(p.kelvin / shot.temp)).rounded(), -100, 100)
         settings.tint = CMath.clamp(((p.tint - shot.tint) / 1.5).rounded(), -100, 100)
-        commit("Balance de blancos: \(p.name)")
+        commit(tr("Balance de blancos: %@", tr(p.name)))
     }
 
     func autoTone() {
@@ -2703,15 +2740,14 @@ final class Store: ObservableObject {
         if targets.isEmpty {
             guard photos.count > 1 else { flash("Importa más fotos para igualar su exposición"); return }
             let a = NSAlert()
-            a.messageText = "Igualar exposición"
-            a.informativeText = "No hay otras fotos marcadas (⌘-clic o ⇧-clic en la tira). "
-                + "¿Igualar la exposición de las otras \(photos.count - 1) fotos a la de esta?"
-            a.addButton(withTitle: "Igualar todas")
-            a.addButton(withTitle: "Cancelar")
+            a.messageText = tr("Igualar exposición")
+            a.informativeText = tr("No hay otras fotos marcadas (⌘-clic o ⇧-clic en la tira). ¿Igualar la exposición de las otras %@ fotos a la de esta?", "\(photos.count - 1)")
+            a.addButton(withTitle: tr("Igualar todas"))
+            a.addButton(withTitle: tr("Cancelar"))
             guard a.runModal() == .alertFirstButtonReturn else { return }
             targets = photos.filter { $0.id != ref.id }
         }
-        status = "Igualando exposición…"
+        status = tr("Igualando exposición…")
         let refReq = Engine.Request(url: ref.url, isRAW: ref.isRAW, settings: settings, maxPixel: 384)
         let jobs = targets.map { ($0.id, Engine.Request(url: $0.url, isRAW: $0.isRAW, settings: $0.settings, maxPixel: 384)) }
         thumbQueue.async { [thumbEngine] in
@@ -2747,7 +2783,7 @@ final class Store: ObservableObject {
                     }
                     changed += 1
                 }
-                self.flash(changed == 0 ? "La exposición ya coincide" : "Exposición igualada en \(changed) \(changed == 1 ? "foto" : "fotos")")
+                self.flash(changed == 0 ? "La exposición ya coincide" : tr(changed == 1 ? "Exposición igualada en %@ foto" : "Exposición igualada en %@ fotos", "\(changed)"))
                 self.saveCatalogSoon()
             }
         }
@@ -2756,7 +2792,7 @@ final class Store: ObservableObject {
     /// Endereza la foto nivelando el horizonte o las líneas rectas.
     func autoStraighten() {
         guard let photo = current else { return }
-        status = "Buscando el horizonte…"
+        status = tr("Buscando el horizonte…")
         let req = Engine.Request(url: photo.url, isRAW: photo.isRAW, settings: settings)
         let id = photo.id
         renderQueue.async { [engine] in
@@ -2776,7 +2812,7 @@ final class Store: ObservableObject {
     /// Geometría automática: endereza y corrige las verticales convergentes (como Upright Auto).
     func autoGeometry() {
         guard let photo = current else { return }
-        status = "Analizando líneas verticales…"
+        status = tr("Analizando líneas verticales…")
         let req = Engine.Request(url: photo.url, isRAW: photo.isRAW, settings: settings)
         let id = photo.id
         renderQueue.async { [engine] in
@@ -2853,7 +2889,7 @@ final class Store: ObservableObject {
     func addMask(_ kind: MaskKind, raster: Data? = nil) {
         let s = settings
         let n = s.masks.filter { $0.kind == kind }.count + 1
-        var m = Mask(name: n > 1 ? "\(kind.label) \(n)" : kind.label, kind: kind)
+        var m = Mask(name: n > 1 ? "\(tr(kind.label)) \(n)" : tr(kind.label), kind: kind)
         switch kind {
         case .linear:
             m.x0 = s.cropX + s.cropW / 2; m.y0 = s.cropY + s.cropH * 0.1
@@ -2870,13 +2906,13 @@ final class Store: ObservableObject {
         selectedMaskID = m.id
         if tool != .mask { zoomed = false; tool = .mask }
         endEditing()
-        commit("Nueva máscara: \(kind.label)")
+        commit(tr("Nueva máscara: %@", tr(kind.label)))
     }
 
     /// Crea (o vuelve a calcular) una máscara de sujeto, personas o fondo con Vision.
     func addDetectedMask(_ kind: MaskKind, replacing id: UUID? = nil) {
         guard let photo = current else { return }
-        status = kind == .people ? "Detectando personas…" : (kind == .background ? "Detectando fondo…" : "Detectando sujeto…")
+        status = tr(kind == .people ? "Detectando personas…" : (kind == .background ? "Detectando fondo…" : "Detectando sujeto…"))
         var s = settings
         s.masks = []
         let req = Engine.Request(url: photo.url, isRAW: photo.isRAW, settings: s)
@@ -2890,7 +2926,7 @@ final class Store: ObservableObject {
                 }
                 if let id, let i = self.settings.masks.firstIndex(where: { $0.id == id }) {
                     self.settings.masks[i].raster = data
-                    self.commit("Volver a detectar: \(kind.label)")
+                    self.commit(tr("Volver a detectar: %@", tr(kind.label)))
                 } else {
                     self.addMask(kind, raster: data)
                 }
@@ -3104,7 +3140,7 @@ final class Store: ObservableObject {
         s.cropX = CMath.clamp(cx - w / 2, 0, 1 - w); s.cropY = CMath.clamp(cy - h / 2, 0, 1 - h)
         s.cropW = w; s.cropH = h
         settings = s
-        commit("Aspecto de recorte \(cropAspect.rawValue)")
+        commit(tr("Aspecto de recorte %@", tr(cropAspect.rawValue)))
     }
 
     func resetCrop() {
@@ -3358,14 +3394,14 @@ final class Store: ObservableObject {
             panel.canChooseDirectories = true
             panel.canChooseFiles = false
             panel.canCreateDirectories = true
-            panel.prompt = "Exportar aquí"
+            panel.prompt = tr("Exportar aquí")
             guard panel.runModal() == .OK, let dir = panel.url else { return }
             base = dir
         }
         let skipped = all.count - items.count
         exportCancel.value = false
         exportProgress = 0
-        exportLabel = "Exportando 0 de \(items.count)"
+        exportLabel = tr("Exportando %@ de %@", "0", "\(items.count)")
         let jobs = items.map { Engine.Request(url: $0.url, isRAW: $0.isRAW, settings: $0.settings, maxPixel: nil, fresh: true) }
         let cancel = exportCancel
         exportQueue.async { [exportEngine] in
@@ -3393,14 +3429,14 @@ final class Store: ObservableObject {
                 } catch { errors += 1 }
                 DispatchQueue.main.async {
                     self.exportProgress = Double(n + 1) / Double(jobs.count)
-                    self.exportLabel = "Exportando \(n + 1) de \(jobs.count)"
+                    self.exportLabel = tr("Exportando %@ de %@", "\(n + 1)", "\(jobs.count)")
                 }
             }
             DispatchQueue.main.async {
                 self.exportProgress = nil
-                var msg = cancel.value ? "Exportación cancelada: \(done.count) fotos" : "Exportadas \(done.count) fotos"
-                if errors > 0 { msg += " · \(errors) con errores" }
-                if skipped > 0 { msg += " · \(skipped) no encontradas" }
+                var msg = tr(cancel.value ? "Exportación cancelada: %@ fotos" : "Exportadas %@ fotos", "\(done.count)")
+                if errors > 0 { msg += tr(" · %@ con errores", "\(errors)") }
+                if skipped > 0 { msg += tr(" · %@ no encontradas", "\(skipped)") }
                 self.flash(msg)
                 if !done.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(done) }
             }
@@ -3420,8 +3456,9 @@ final class Store: ObservableObject {
     }
 
     func flash(_ msg: String) {
-        status = msg
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { if self.status == msg { self.status = nil } }
+        let m = tr(msg)
+        status = m
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { if self.status == m { self.status = nil } }
     }
 
     // MARK: Catálogo
@@ -3486,8 +3523,8 @@ final class Store: ObservableObject {
         guard let i = photos.firstIndex(where: { $0.id == id }) else { return }
         let p = NSOpenPanel()
         p.allowedContentTypes = [.image, .rawImage]
-        p.message = "¿Dónde está ahora \(photos[i].name)?"
-        p.prompt = "Localizar"
+        p.message = tr("¿Dónde está ahora %@?", photos[i].name)
+        p.prompt = tr("Localizar")
         guard p.runModal() == .OK, let url = p.url else { return }
         relink(i, to: url)
         let dir = url.deletingLastPathComponent()
@@ -3496,7 +3533,7 @@ final class Store: ObservableObject {
             let cand = dir.appendingPathComponent(photos[j].name)
             if FileManager.default.fileExists(atPath: cand.path) { relink(j, to: cand); found += 1 }
         }
-        flash(found > 0 ? "Foto localizada y \(found) más en la misma carpeta" : "Foto localizada")
+        flash(found > 0 ? tr("Foto localizada y %@ más en la misma carpeta", "\(found)") : "Foto localizada")
         saveCatalogSoon()
         if id == selectedID { scheduleRender() }
     }
@@ -3622,7 +3659,7 @@ struct IconButton: View {
         }
         .buttonStyle(.plain)
         .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hover = h } }
-        .help(help)
+        .help(tr(help))
     }
 }
 
@@ -3635,7 +3672,7 @@ struct Segmented<T: Hashable>: View {
         HStack(spacing: 2) {
             ForEach(Array(options.enumerated()), id: \.offset) { _, opt in
                 let on = opt.0 == selection
-                Text(opt.1)
+                Text(tr(opt.1))
                     .font(.system(size: 10.5, weight: on ? .semibold : .regular))
                     .foregroundColor(on ? Theme.onAccent : Theme.secondary)
                     .lineLimit(1)
@@ -3675,7 +3712,7 @@ struct FieldLabel: View {
     let text: String
     init(_ text: String) { self.text = text }
     var body: some View {
-        Text(text).font(.system(size: 11)).foregroundColor(Theme.secondary).lineLimit(1).frame(width: 86, alignment: .trailing)
+        Text(tr(text)).font(.system(size: 11)).foregroundColor(Theme.secondary).lineLimit(1).frame(width: 86, alignment: .trailing)
     }
 }
 
@@ -3824,7 +3861,7 @@ struct LRSlider: View {
     var body: some View {
         let isDefault = abs(value - defaultValue) < step / 2
         HStack(spacing: 8) {
-            Text(label)
+            Text(tr(label))
                 .font(.system(size: 11))
                 .foregroundColor(hover ? .white : (isDefault ? Theme.secondary : Theme.text))
                 .lineLimit(1)
@@ -3853,7 +3890,7 @@ struct LRSlider: View {
         }
     }
 
-    private func commit() { store.commit("\(label) \(formatValue(value, decimals, range.lowerBound < 0))") }
+    private func commit() { store.commit("\(tr(label)) \(formatValue(value, decimals, range.lowerBound < 0))") }
 }
 
 struct SubHeader: View {
@@ -3869,12 +3906,12 @@ struct SubHeader: View {
     }
     var body: some View {
         HStack(spacing: 6) {
-            Text(title.uppercased()).font(.system(size: 10, weight: .semibold)).tracking(0.8)
+            Text(tr(title).uppercased()).font(.system(size: 10, weight: .semibold)).tracking(0.8)
                 .foregroundColor(group != nil && hover ? Theme.text : Theme.dim)
                 .contentShape(Rectangle())
                 .onHover { hover = $0 }
-                .onTapGesture(count: 2) { if let group { store.resetGroup(group, title.lowercased()) } }
-                .help(group != nil ? "Doble clic para restablecer \(title.lowercased())" : "")
+                .onTapGesture(count: 2) { if let group { store.resetGroup(group, tr(title).lowercased()) } }
+                .help(group != nil ? tr("Doble clic para restablecer %@", tr(title).lowercased()) : "")
             Rectangle().fill(Theme.border).frame(height: 1)
             if let trailing { trailing }
         }
@@ -3911,7 +3948,7 @@ struct PanelSection<Content: View>: View {
         let disabled = group.map { store.disabledGroups.contains($0) } ?? false
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Text(title)
+                Text(tr(title))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(disabled ? Theme.dim : (open || hover ? Theme.text : Theme.secondary))
                     .strikethrough(disabled, color: Theme.dim)
@@ -3922,8 +3959,8 @@ struct PanelSection<Content: View>: View {
                                on: disabled || hover) { store.toggleGroup(group) }
                 }
                 if let group, modified, hover {
-                    headerIcon("arrow.counterclockwise", "Restablecer \(title.lowercased())", on: true) {
-                        store.resetGroup(group, title.lowercased())
+                    headerIcon("arrow.counterclockwise", tr("Restablecer %@", tr(title).lowercased()), on: true) {
+                        store.resetGroup(group, tr(title).lowercased())
                     }
                 }
                 Image(systemName: "chevron.right")
@@ -3937,7 +3974,7 @@ struct PanelSection<Content: View>: View {
             .contentShape(Rectangle())
             .onTapGesture { toggleOpen() }
             .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hover = h } }
-            .help(Self.developTitles.contains(title) ? "⌥-clic: abrir solo este panel" : "")
+            .help(Self.developTitles.contains(title) ? tr("⌥-clic: abrir solo este panel") : "")
             .contextMenu {
                 if Self.developTitles.contains(title) {
                     Toggle("Modo solo (un panel abierto)", isOn: $solo)
@@ -3978,7 +4015,7 @@ struct PanelSection<Content: View>: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(help)
+        .help(tr(help))
     }
 }
 
@@ -3992,7 +4029,7 @@ struct SmallButton: View {
         self.action = action
     }
     var body: some View {
-        Button(title, action: action).buttonStyle(GhostButtonStyle(prominent: prominent, compact: true))
+        Button(tr(title), action: action).buttonStyle(GhostButtonStyle(prominent: prominent, compact: true))
     }
 }
 
@@ -4007,7 +4044,7 @@ struct HintText: View {
     let text: String
     init(_ text: String) { self.text = text }
     var body: some View {
-        Text(text).font(.system(size: 11)).foregroundColor(Theme.dim).fixedSize(horizontal: false, vertical: true)
+        Text(tr(text)).font(.system(size: 11)).foregroundColor(Theme.dim).fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -4159,7 +4196,7 @@ struct ToolBlock<Content: View>: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: icon).font(.system(size: 11, weight: .semibold)).foregroundColor(Theme.accent)
-                Text(title.uppercased()).font(.system(size: 10.5, weight: .bold)).tracking(0.9).foregroundColor(Theme.accent)
+                Text(tr(title).uppercased()).font(.system(size: 10.5, weight: .bold)).tracking(0.9).foregroundColor(Theme.accent)
                 Spacer()
                 SmallButton("Hecho", prominent: true, action: onDone)
             }
@@ -4183,7 +4220,7 @@ struct SectionDivider: View {
     init(_ title: String) { self.title = title }
     var body: some View {
         HStack(spacing: 8) {
-            Text(title.uppercased()).font(.system(size: 9.5, weight: .semibold)).tracking(1).foregroundColor(Theme.dim)
+            Text(tr(title).uppercased()).font(.system(size: 9.5, weight: .semibold)).tracking(1).foregroundColor(Theme.dim)
             Rectangle().fill(Theme.border).frame(height: 1)
         }
         .padding(.horizontal, 12)
@@ -4199,7 +4236,7 @@ struct CropPanel: View {
             HStack(spacing: 8) {
                 FieldLabel("Aspecto")
                 Picker("", selection: Binding(get: { store.cropAspect }, set: { store.setCropAspect($0) })) {
-                    ForEach(CropAspect.allCases) { Text($0.rawValue).tag($0) }
+                    ForEach(CropAspect.allCases) { Text(tr($0.rawValue)).tag($0) }
                 }
                 .labelsHidden()
                 .controlSize(.small)
@@ -4336,7 +4373,7 @@ struct MaskPanel: View {
         } label: {
             VStack(spacing: 5) {
                 Image(systemName: kind.icon).font(.system(size: 15, weight: .light))
-                Text(kind.shortLabel).font(.system(size: 9.5))
+                Text(tr(kind.shortLabel)).font(.system(size: 9.5))
             }
             .foregroundColor(Theme.text)
             .frame(maxWidth: .infinity)
@@ -4347,7 +4384,7 @@ struct MaskPanel: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(createHelp(kind))
+        .help(tr(createHelp(kind)))
     }
 
     private func createHelp(_ kind: MaskKind) -> String {
@@ -4471,7 +4508,7 @@ struct HealPanel: View {
             HintText("Haz clic sobre una mancha para eliminarla: el origen se elige solo. Arrastra el círculo discontinuo para usar otro origen. ⌫ borra la seleccionada.")
                 .padding(.top, 2)
             HStack {
-                Text(store.settings.heals.isEmpty ? "Sin correcciones" : "\(store.settings.heals.count) correcciones")
+                Text(store.settings.heals.isEmpty ? tr("Sin correcciones") : tr("%@ correcciones", "\(store.settings.heals.count)"))
                     .font(.system(size: 10.5)).foregroundColor(Theme.secondary)
                 Spacer()
                 if let id = store.selectedHealID { SmallButton("Eliminar") { store.deleteHeal(id) } }
@@ -4774,9 +4811,9 @@ struct BasicPanel: View {
                 FieldLabel("Perfil")
                 Picker("", selection: Binding(get: { store.settings.profile }, set: {
                     store.settings.profile = $0
-                    store.commit("Perfil \($0.rawValue)")
+                    store.commit(tr("Perfil %@", tr($0.rawValue)))
                 })) {
-                    ForEach(Profile.allCases) { Text($0.rawValue).tag($0) }
+                    ForEach(Profile.allCases) { Text(tr($0.rawValue)).tag($0) }
                 }
                 .labelsHidden()
                 .controlSize(.small)
@@ -4791,7 +4828,7 @@ struct BasicPanel: View {
             if s.hdr {
                 LRSlider("Rango HDR", store.bind(\.hdrHeadroom), 1...4, def: 2, step: 0.1, decimals: 1, track: Tracks.gray)
                 HintText((NSScreen.main?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1) > 1
-                    ? "Las luces pueden superar el blanco hasta \(formatValue(s.hdrHeadroom, 1, false)) pasos. Exporta en HEIC para conservar el HDR; en JPEG, TIFF o PNG se comprimen las luces."
+                    ? tr("Las luces pueden superar el blanco hasta %@ pasos. Exporta en HEIC para conservar el HDR; en JPEG, TIFF o PNG se comprimen las luces.", formatValue(s.hdrHeadroom, 1, false))
                     : "Esta pantalla no muestra HDR: verás las luces recortadas, pero el HEIC exportado sí las conserva.")
             }
             HStack {
@@ -4801,7 +4838,7 @@ struct BasicPanel: View {
                     Button("Automático") { store.autoWhiteBalance() }
                     if raw {
                         Divider()
-                        ForEach(wbPresets, id: \.name) { p in Button(p.name) { store.applyWB(p) } }
+                        ForEach(wbPresets, id: \.name) { p in Button(tr(p.name)) { store.applyWB(p) } }
                     }
                 } label: {
                     Text(s.temp == 0 && s.tint == 0 ? "Como se tomó" : "Personalizado").font(.system(size: 11))
@@ -4818,7 +4855,7 @@ struct BasicPanel: View {
             LRSlider("Matiz", store.bind(\.tint), track: Tracks.tint,
                      display: raw && shot != nil ? formatValue((shot!.tint + s.tint * 1.5).rounded(), 0, true) : nil)
 
-            SubHeader("Tono", trailing: AnyView(SmallButton("Auto") { store.autoTone() }), reset: .tone)
+            SubHeader("Tono (básico)", trailing: AnyView(SmallButton("Auto") { store.autoTone() }), reset: .tone)
             LRSlider("Exposición", store.bind(\.exposure), -5...5, step: 0.01, decimals: 2, track: Tracks.gray)
             LRSlider("Contraste", store.bind(\.contrast), track: Tracks.gray)
             LRSlider("Iluminaciones", store.bind(\.highlights), track: Tracks.gray)
@@ -4999,7 +5036,7 @@ struct ColorGradingPanel: View {
             } else {
                 let kp = Self.paths[mode - 1]
                 ColorWheel(hue: store.bind(kp.appending(path: \.hue)), sat: store.bind(kp.appending(path: \.sat)), size: 170) {
-                    store.commit("Gradación: \(Self.names[mode - 1])")
+                    store.commit(tr("Gradación: %@", tr(Self.names[mode - 1])))
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 4)
@@ -5015,12 +5052,12 @@ struct ColorGradingPanel: View {
     private func wheelBlock(_ i: Int, size: CGFloat) -> some View {
         let kp = Self.paths[i]
         return VStack(spacing: 4) {
-            Text(Self.names[i]).font(.system(size: 10)).foregroundColor(Theme.dim)
+            Text(tr(Self.names[i])).font(.system(size: 10)).foregroundColor(Theme.dim)
             ColorWheel(hue: store.bind(kp.appending(path: \.hue)), sat: store.bind(kp.appending(path: \.sat)), size: size) {
-                store.commit("Gradación: \(Self.names[i])")
+                store.commit(tr("Gradación: %@", tr(Self.names[i])))
             }
             SliderTrack(value: store.bind(kp.appending(path: \.lum)), range: -100...100, track: Tracks.gray) {
-                store.commit("Luminancia \(Self.names[i])")
+                store.commit(tr("Luminancia %@", tr(Self.names[i])))
             }
             .frame(width: size, height: 14)
         }
@@ -5521,8 +5558,8 @@ struct ExportSheet: View {
                 Section("Fotos") {
                     Picker("Exportar", selection: $scope) {
                         Text("Foto seleccionada").tag(Store.ExportScope.selected.rawValue)
-                        Text("Marcadas (\(store.exportItems(.marked).count))").tag(Store.ExportScope.marked.rawValue)
-                        Text("Todas (\(store.photos.count))").tag(Store.ExportScope.all.rawValue)
+                        Text(tr("Marcadas (%@)", "\(store.exportItems(.marked).count)")).tag(Store.ExportScope.marked.rawValue)
+                        Text(tr("Todas (%@)", "\(store.photos.count)")).tag(Store.ExportScope.all.rawValue)
                     }
                 }
                 Section("Destino") {
@@ -5532,7 +5569,7 @@ struct ExportSheet: View {
                     }
                     if !sameFolder {
                         HStack {
-                            Text(folderPath.isEmpty ? "Se preguntará al exportar" : folderPath)
+                            Text(folderPath.isEmpty ? tr("Se preguntará al exportar") : folderPath)
                                 .font(.system(size: 11)).foregroundColor(folderPath.isEmpty ? Theme.dim : Theme.text)
                                 .lineLimit(1).truncationMode(.middle)
                             Spacer()
@@ -5543,16 +5580,16 @@ struct ExportSheet: View {
                 }
                 Section("Nombre de archivo") {
                     Picker("Nombre", selection: $naming) {
-                        ForEach(ExportNaming.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                        ForEach(ExportNaming.allCases) { Text(tr($0.rawValue)).tag($0.rawValue) }
                     }
                     if nm != .original {
-                        TextField(nm == .suffix ? "Sufijo (p. ej. -editada)" : "Nombre base (p. ej. Viaje)", text: $namingText)
+                        TextField(tr(nm == .suffix ? "Sufijo (p. ej. -editada)" : "Nombre base (p. ej. Viaje)"), text: $namingText)
                     }
-                    Text("Ejemplo: " + example(nm, fmt)).font(.system(size: 10.5)).foregroundColor(Theme.dim)
+                    Text(tr("Ejemplo: %@", example(nm, fmt))).font(.system(size: 10.5)).foregroundColor(Theme.dim)
                 }
                 Section("Formato") {
                     Picker("Formato", selection: $format) {
-                        ForEach(ExportFormat.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                        ForEach(ExportFormat.allCases) { Text(tr($0.rawValue)).tag($0.rawValue) }
                     }
                     if fmt.lossy {
                         HStack {
@@ -5563,7 +5600,7 @@ struct ExportSheet: View {
                 }
                 Section("Tamaño de imagen") {
                     Picker("Ajustar", selection: $sizing) {
-                        ForEach(ExportSizing.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                        ForEach(ExportSizing.allCases) { Text(tr($0.rawValue)).tag($0.rawValue) }
                     }
                     if sz != .original {
                         HStack {
@@ -5574,20 +5611,20 @@ struct ExportSheet: View {
                         }
                     }
                     Picker("Resolución", selection: $ppi) {
-                        ForEach([72, 150, 240, 300, 360], id: \.self) { Text("\($0) ppp").tag($0) }
+                        ForEach([72, 150, 240, 300, 360], id: \.self) { Text(tr("%@ ppp", "\($0)")).tag($0) }
                     }
                     if let p = store.current, p.pixelSize.width > 0 {
                         let s = min(noEnlarge ? 1 : .infinity, sz.scale(p.pixelSize.width * store.settings.cropW,
                                                                          p.pixelSize.height * store.settings.cropH, value: sizeValue))
-                        Text("Foto actual: \(Int((p.pixelSize.width * store.settings.cropW * s).rounded())) × \(Int((p.pixelSize.height * store.settings.cropH * s).rounded())) px")
+                        Text(tr("Foto actual: %@ × %@ px", "\(Int((p.pixelSize.width * store.settings.cropW * s).rounded()))", "\(Int((p.pixelSize.height * store.settings.cropH * s).rounded()))"))
                             .font(.system(size: 10.5)).foregroundColor(Theme.dim)
                     }
                 }
                 Section("Metadatos") {
                     Picker("Incluir", selection: $metadata) {
-                        ForEach(ExportMetadata.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                        ForEach(ExportMetadata.allCases) { Text(tr($0.rawValue)).tag($0.rawValue) }
                     }
-                    Text(metadataHint).font(.system(size: 10.5)).foregroundColor(Theme.dim)
+                    Text(tr(metadataHint)).font(.system(size: 10.5)).foregroundColor(Theme.dim)
                 }
             }
             .formStyle(.grouped)
@@ -5633,7 +5670,7 @@ struct ExportSheet: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
-        panel.prompt = "Elegir"
+        panel.prompt = tr("Elegir")
         if !folderPath.isEmpty { panel.directoryURL = URL(fileURLWithPath: folderPath) }
         if panel.runModal() == .OK, let url = panel.url { folderPath = url.path }
     }
@@ -5720,7 +5757,7 @@ struct LeftPanel: View {
                     if let h = store.history {
                         VStack(spacing: 1) {
                             ForEach(Array(h.entries.enumerated()).reversed(), id: \.element.id) { i, e in
-                                Text(e.name)
+                                Text(tr(e.name))
                                     .font(.system(size: 11, weight: i == h.index ? .semibold : .regular))
                                     .foregroundColor(i == h.index ? .white : (i > h.index ? Theme.dim : Theme.text))
                                     .lineLimit(1)
@@ -5749,7 +5786,7 @@ struct LeftPanel: View {
     }
 
     private func row(_ name: String, action: @escaping () -> Void) -> some View {
-        Text(name)
+        Text(tr(name))
             .font(.system(size: 11))
             .foregroundColor(Theme.text)
             .lineLimit(1)
@@ -5990,7 +6027,7 @@ struct SplitCompare: View {
 struct CanvasBadge: View {
     let text: String
     var body: some View {
-        Text(text).font(.system(size: 10.5, weight: .medium)).foregroundColor(.white)
+        Text(tr(text)).font(.system(size: 10.5, weight: .medium)).foregroundColor(.white)
             .padding(.horizontal, 9).padding(.vertical, 4)
             .background(Capsule().fill(Color.black.opacity(0.62)))
             .overlay(Capsule().stroke(Color.white.opacity(0.08)))
@@ -6002,7 +6039,7 @@ struct Toast: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "checkmark.circle.fill").font(.system(size: 12)).foregroundColor(.white)
-            Text(text).font(.system(size: 12, weight: .medium)).foregroundColor(.white)
+            Text(tr(text)).font(.system(size: 12, weight: .medium)).foregroundColor(.white)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -6025,7 +6062,7 @@ struct CanvasView: View {
                         if store.compareReference {
                             let ref = store.photos.first { $0.id == store.referenceID }
                             SideBySide(after: cg, before: ref == nil ? nil : store.referencePreview,
-                                       leftLabel: ref.map { "Referencia · \($0.name)" } ?? "Elige una referencia (clic derecho en la tira)",
+                                       leftLabel: ref.map { tr("Referencia · %@", $0.name) } ?? "Elige una referencia (clic derecho en la tira)",
                                        rightLabel: "Actual").padding(20)
                         } else {
                             SideBySide(after: cg, before: store.beforePreview, leftLabel: "Antes", rightLabel: "Después").padding(20)
@@ -6041,7 +6078,7 @@ struct CanvasView: View {
                 } else if let p = store.current, p.missing {
                     VStack(spacing: 12) {
                         Image(systemName: "questionmark.folder").font(.system(size: 38, weight: .light)).foregroundColor(Color.orange)
-                        Text("No se encuentra «\(p.name)»").font(.system(size: 15, weight: .semibold)).foregroundColor(.white)
+                        Text(tr("No se encuentra «%@»", p.name)).font(.system(size: 15, weight: .semibold)).foregroundColor(.white)
                         Text(p.url.deletingLastPathComponent().path).font(.system(size: 11)).foregroundColor(Theme.dim)
                             .lineLimit(1).truncationMode(.middle).frame(maxWidth: 420)
                         Text("Se ha movido, renombrado o el disco no está conectado. Tus ajustes se conservan.")
@@ -6257,6 +6294,16 @@ struct TopBar: View {
                 moduleButton("Revelar", .develop, key: "D")
             }
             Spacer().frame(width: 18)
+            Menu {
+                ForEach(AppLanguage.allCases) { l in
+                    Button((l == AppLanguage.current ? "✓  " : "     ") + l.name) { AppLanguage.choose(l) }
+                }
+            } label: {
+                Text(AppLanguage.current.rawValue.uppercased()).font(.system(size: 10.5, weight: .semibold).monospaced())
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Idioma de la interfaz")
             IconButton(icon: "keyboard", help: "Atajos de teclado (?)", size: 12) { store.showShortcuts = true }
         }
         .padding(.leading, 82)
@@ -6272,14 +6319,14 @@ struct TopBar: View {
             if m == .develop { store.scheduleRender() }
         } label: {
             VStack(spacing: 4) {
-                Text(t).font(.system(size: 12.5, weight: on ? .semibold : .regular)).foregroundColor(on ? .white : Theme.secondary)
+                Text(tr(t)).font(.system(size: 12.5, weight: on ? .semibold : .regular)).foregroundColor(on ? .white : Theme.secondary)
                 Capsule().fill(Color.white).frame(width: on ? 18 : 0, height: 2).opacity(on ? 1 : 0)
             }
             .padding(.top, 6)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("\(t) (\(key))")
+        .help("\(tr(t)) (\(key))")
     }
 }
 
@@ -6299,7 +6346,7 @@ struct BottomBar: View {
                         Button("\(Int(l * 100)) %") { store.zoom(to: l) }
                     }
                 } label: {
-                    Text(store.zoomed ? "\(store.zoomPercent) %" : "Encajar").font(.system(size: 11).monospacedDigit())
+                    Text(store.zoomed ? "\(store.zoomPercent) %" : tr("Encajar")).font(.system(size: 11).monospacedDigit())
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
@@ -6318,7 +6365,7 @@ struct BottomBar: View {
                     if p.pixelSize.width > 0 {
                         Text("\(Int(p.pixelSize.width)) × \(Int(p.pixelSize.height))").font(.system(size: 10.5).monospacedDigit()).foregroundColor(Theme.dim)
                     }
-                    Text("\(i + 1) de \(store.photos.count)").font(.system(size: 10.5).monospacedDigit()).foregroundColor(Theme.dim)
+                    Text(tr("%@ de %@", "\(i + 1)", "\(store.photos.count)")).font(.system(size: 10.5).monospacedDigit()).foregroundColor(Theme.dim)
                 }
             }
             Spacer()
@@ -6330,11 +6377,11 @@ struct BottomBar: View {
                 }
             }
             if store.missingCount > 0 {
-                Text("\(store.missingCount) no encontradas").font(.system(size: 10.5)).foregroundColor(.orange)
+                Text(tr("%@ no encontradas", "\(store.missingCount)")).font(.system(size: 10.5)).foregroundColor(.orange)
                     .help("Clic derecho en la miniatura ▸ Localizar…")
             }
             if !store.multiSelection.isEmpty {
-                Text("\(store.multiSelection.count + 1) marcadas").font(.system(size: 10.5)).foregroundColor(Theme.secondary)
+                Text(tr("%@ marcadas", "\(store.multiSelection.count + 1)")).font(.system(size: 10.5)).foregroundColor(Theme.secondary)
                 Button("Igualar exposición") { store.matchExposure() }.buttonStyle(GhostButtonStyle(compact: true))
                     .help("Iguala el brillo de las fotos marcadas al de la actual (⌥⇧⌘M)")
             }
@@ -6385,12 +6432,12 @@ struct ShortcutsSheet: View {
             SubHeader(groups[i].0)
             ForEach(groups[i].1, id: \.0) { k, d in
                 HStack(spacing: 10) {
-                    Text(k).font(.system(size: 10.5, weight: .medium).monospaced()).foregroundColor(.white)
+                    Text(tr(k)).font(.system(size: 10.5, weight: .medium).monospaced()).foregroundColor(.white)
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.08)))
                         .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.1)))
                         .frame(minWidth: 96, alignment: .leading)
-                    Text(d).font(.system(size: 11.5)).foregroundColor(Theme.text)
+                    Text(tr(d)).font(.system(size: 11.5)).foregroundColor(Theme.text)
                 }
             }
         }
