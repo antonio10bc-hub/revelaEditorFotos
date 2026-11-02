@@ -162,7 +162,7 @@ EN = {
     "Vectorscopio": "Vectorscope", "Falso color": "False color", "Falso color  (F)": "False color  (F)",
     "Falso color de exposición (F)": "Exposure false color (F)", "Negro": "Black", "Muy oscuro": "Very dark",
     "Gris medio": "Middle gray", "Piel +1": "Skin +1", "Casi blanco": "Near white", "Quemado": "Clipped",
-    "Lupa": "Loupe", "Lupa  (L)": "Loupe  (L)", "Lupa 100 %": "Loupe 100 %", "Lupa al 100 % bajo el cursor (L)": "100 % loupe under the cursor (L)",
+    "Lupa": "Loupe", "Lupa  (L)": "Loupe  (L)", "Lupa · rueda para ampliar": "Loupe · scroll to magnify", "Lupa bajo el cursor (L)": "Loupe under the cursor (L)",
     "Evaluación de color": "Color assessment", "Evaluación de color  (C)": "Color assessment  (C)",
     "Evaluación de color: fondo gris y marco blanco (C)": "Color assessment: gray background and white frame (C)",
     # Paneles: restablecer, ojo, modo solo

@@ -269,8 +269,8 @@
 "Luminancia %@" = "Luminance %@";
 "Lupa" = "Loupe";
 "Lupa  (L)" = "Loupe  (L)";
-"Lupa 100 %" = "Loupe 100 %";
-"Lupa al 100 % bajo el cursor (L)" = "100 % loupe under the cursor (L)";
+"Lupa bajo el cursor (L)" = "Loupe under the cursor (L)";
+"Lupa · rueda para ampliar" = "Loupe · scroll to magnify";
 "Luz" = "Light";
 "Luz de día" = "Daylight";
 "Magenta" = "Magenta";

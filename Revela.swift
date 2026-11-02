@@ -2327,9 +2327,12 @@ final class PreviewModel: ObservableObject {
     @Published var scope: CGImage?
 }
 
-/// Posición de la lupa sobre la foto (0…1). Aparte para que mover el ratón solo redibuje la lupa.
+/// Posición de la lupa sobre la foto (0…1) y su aumento respecto a la vista. Aparte para que mover el ratón
+/// solo redibuje la lupa.
 final class LoupeModel: ObservableObject {
     @Published var point: CGPoint?
+    /// Veces que amplía lo que se ve (la rueda o el pellizco lo cambian mientras está activa).
+    @Published var magnification = 3.0
 }
 
 /// Referencia al Store que NO suscribe la vista a sus cambios (a diferencia de @EnvironmentObject):
@@ -3493,6 +3496,13 @@ final class Store: ObservableObject {
             return false
         }
         let anchor = CGPoint(x: loc.x - canvasFrame.minX, y: loc.y - canvasFrame.minY)
+        if loupe {
+            // Con la lupa activa, la rueda y el pellizco cambian su aumento en vez del zoom de la vista
+            let f = e.type == .magnify ? 1 + e.magnification
+                : pow(e.hasPreciseScrollingDeltas ? 1.01 : 1.25, e.isDirectionInvertedFromDevice ? -e.scrollingDeltaY : e.scrollingDeltaY)
+            loupeModel.magnification = min(max(loupeModel.magnification * f, 1.5), 16)
+            return true
+        }
         if e.type == .magnify {
             zoom(by: 1 + e.magnification, anchor: anchor)
             return true
@@ -6143,23 +6153,25 @@ struct HistoryList: View, Equatable {
     }
 }
 
-/// Lupa al 100 % que sigue al cursor (mientras está activa, la foto se revela a resolución completa).
+/// Lupa que sigue al cursor y amplía lo que se ve (3× por defecto; la rueda lo cambia). Mientras está activa,
+/// la foto se revela a resolución completa.
 struct LoupeView: View {
     let image: CGImage
     @ObservedObject var loupe: LoupeModel
-    let scale: CGFloat
-    private let side: CGFloat = 220
+    /// Ancho en puntos de la foto (recortada) al 100 %: para mostrar el porcentaje real.
+    let fullWidth: CGFloat
+    private let side: CGFloat = 240
 
     var body: some View {
         GeometryReader { g in
             if let p = loupe.point {
-                // Tamaño en puntos de la foto a 100 % (un píxel de la imagen por píxel de pantalla)
-                let w = CGFloat(image.width) / scale, h = CGFloat(image.height) / scale
+                let w = g.size.width * loupe.magnification, h = g.size.height * loupe.magnification
+                let pct = Int((w / max(1, fullWidth) * 100).rounded())
                 let cur = CGPoint(x: p.x * g.size.width, y: p.y * g.size.height)
                 let cx = cur.x + side + 24 > g.size.width ? cur.x - side / 2 - 18 : cur.x + side / 2 + 18
                 let cy = min(max(cur.y, side / 2), max(side / 2, g.size.height - side / 2))
                 ZStack {
-                    Image(decorative: image, scale: 1).resizable().interpolation(.none)
+                    Image(decorative: image, scale: 1).resizable().interpolation(pct >= 200 ? .none : .high)
                         .frame(width: w, height: h)
                         .offset(x: (0.5 - p.x) * w, y: (0.5 - p.y) * h)
                     Rectangle().fill(Color.white.opacity(0.55)).frame(width: 1, height: 14)
@@ -6169,7 +6181,7 @@ struct LoupeView: View {
                 .clipped()
                 .background(Theme.canvas)
                 .overlay(Rectangle().stroke(Theme.select, lineWidth: 1))
-                .overlay(Text("100 %").font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .overlay(Text("\(pct) %").font(.system(size: 9, weight: .semibold, design: .monospaced))
                     .foregroundColor(Theme.onSelect).padding(.horizontal, 4).padding(.vertical, 1)
                     .background(Theme.select), alignment: .topLeading)
                 .shadow(color: .black.opacity(0.6), radius: 10, y: 3)
@@ -6483,7 +6495,9 @@ struct CanvasView: View {
                             .overlay(ImageOverlay())
                             .overlay {
                                 if store.loupe && store.tool == .none {
-                                    LoupeView(image: cg, loupe: store.loupeModel, scale: store.backingScale).allowsHitTesting(false)
+                                    LoupeView(image: cg, loupe: store.loupeModel,
+                                              fullWidth: store.fullSize.width * store.settings.cropW / store.backingScale)
+                                        .allowsHitTesting(false)
                                 }
                             }
                             // Evaluación de color: marco blanco (y fondo gris medio) para juzgar el color sin el negro alrededor
@@ -6540,7 +6554,7 @@ struct CanvasView: View {
         if store.zoomed && store.tool == .none { b.append("\(store.zoomPercent) %") }
         if !store.disabledGroups.isEmpty { b.append("Paneles desactivados: vista previa parcial") }
         if store.falseColor { b.append("Falso color") }
-        if store.loupe && store.tool == .none { b.append("Lupa 100 %") }
+        if store.loupe && store.tool == .none { b.append("Lupa · rueda para ampliar") }
         if store.colorAssess { b.append("Evaluación de color") }
         if store.clipHigh || store.clipLow { b.append("Aviso de recorte") }
         switch store.tool {
@@ -6811,7 +6825,7 @@ struct BottomBar: View {
                 IconButton(icon: "thermometer.medium", help: "Falso color de exposición (F)", active: store.falseColor, size: 11) {
                     store.falseColor.toggle()
                 }
-                IconButton(icon: "magnifyingglass", help: "Lupa al 100 % bajo el cursor (L)", active: store.loupe, size: 11) {
+                IconButton(icon: "magnifyingglass", help: "Lupa bajo el cursor (L)", active: store.loupe, size: 11) {
                     store.loupe.toggle()
                 }
                 IconButton(icon: "circle.lefthalf.filled", help: "Evaluación de color: fondo gris y marco blanco (C)",
