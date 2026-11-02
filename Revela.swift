@@ -911,10 +911,27 @@ extension CIImage {
         ])
     }
     /// Toma solo la luminancia de esta imagen y el color de `background` (evita halos de color).
-    func luminance(over background: CIImage) -> CIImage {
-        applyingFilter("CIColorClamp").applyingFilter("CILuminosityBlendMode", parameters: [
-            kCIInputBackgroundImageKey: background.applyingFilter("CIColorClamp"),
-        ])
+    func luminance(over background: CIImage, limit: CGFloat = 1) -> CIImage {
+        guard limit > 1 else {
+            return applyingFilter("CIColorClamp").applyingFilter("CILuminosityBlendMode", parameters: [
+                kCIInputBackgroundImageKey: background.applyingFilter("CIColorClamp"),
+            ])
+        }
+        // HDR: CILuminosityBlendMode recorta en 1, así que se escala el color de fondo por el cociente de luminancias
+        func luma(_ i: CIImage) -> CIImage {
+            let v = CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0)
+            return i.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": v, "inputGVector": v, "inputBVector": v, "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputBiasVector": CIVector(x: 0.01, y: 0.01, z: 0.01, w: 0),
+            ])
+        }
+        let ratio = luma(self).times(luma(background).applyingFilter("CIGammaAdjust", parameters: ["inputPower": -1]))
+            .applyingFilter("CIColorClamp", parameters: ["inputMaxComponents": CIVector(x: 4, y: 4, z: 4, w: 1)])
+        return background.times(ratio).clamped(to: limit)
+    }
+    /// Limita los valores a 0…`limit` (en HDR las luces pueden pasar del blanco SDR).
+    func clamped(to limit: CGFloat) -> CIImage {
+        applyingFilter("CIColorClamp", parameters: ["inputMaxComponents": CIVector(x: limit, y: limit, z: limit, w: 1)])
     }
     func times(_ other: CIImage) -> CIImage {
         applyingFilter("CIMultiplyCompositing", parameters: [kCIInputBackgroundImageKey: other])
@@ -930,6 +947,7 @@ extension CIImage {
 
 let sRGBSpace = CGColorSpace(name: CGColorSpace.sRGB)!
 let linearSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
+let extendedSRGBSpace = CGColorSpace(name: CGColorSpace.extendedSRGB)!
 
 final class Engine: @unchecked Sendable {
     struct Request {
@@ -955,13 +973,13 @@ final class Engine: @unchecked Sendable {
 
     private struct RawKey: Equatable {
         var url: URL, scale: CGFloat, temp: Double, tint: Double
-        var nrL: Double, nrC: Double, nrS: Double, nrD: Double, nrK: Double, lens: Bool
+        var nrL: Double, nrC: Double, nrS: Double, nrD: Double, nrK: Double, lens: Bool, hdr: Bool
     }
 
     let ctx = CIContext(options: [.workingColorSpace: linearSpace, .workingFormat: CIFormat.RGBAh, .cacheIntermediates: false])
     private var rawFilters: [URL: (CIRAWFilter, WhitePoint)] = [:]
     private var rawCache: (key: RawKey, image: CIImage)?
-    private var bitmapCache: (url: URL, maxPx: Int, image: CIImage, full: CGSize)?
+    private var bitmapCache: (url: URL, maxPx: Int, hdr: Bool, image: CIImage, full: CGSize)?
     private var lutKey: EditSettings?
     private var lutData = Data()
     private var defringeKey: [Double] = []
@@ -970,6 +988,8 @@ final class Engine: @unchecked Sendable {
     private var clipKey: [Double] = []
     private var clipData = Data()
     private var rangeCache: [UUID: (key: [Double], data: Data)] = [:]
+    /// Valor máximo de la imagen en esta pasada: 1 en SDR, 2^rango en HDR.
+    private var limit: CGFloat = 1
     private var pointMaskCache: (key: [Double], data: Data)?
 
     // MARK: Base (decodificación)
@@ -994,7 +1014,7 @@ final class Engine: @unchecked Sendable {
         let longE = max(native.width, native.height, 1)
         let scale = req.maxPixel.map { min(1, $0 / longE) } ?? 1
         let key = RawKey(url: req.url, scale: scale, temp: s.temp, tint: s.tint, nrL: s.nrLuminance, nrC: s.nrColor,
-                         nrS: s.nrColorSmooth, nrD: s.nrDetail, nrK: s.nrContrast, lens: s.lensProfile || s.removeCA)
+                         nrS: s.nrColorSmooth, nrD: s.nrDetail, nrK: s.nrContrast, lens: s.lensProfile || s.removeCA, hdr: s.hdr)
         if !req.fresh, let c = rawCache, c.key == key { return (c.image, scale) }
 
         raw.scaleFactor = Float(scale)
@@ -1009,6 +1029,7 @@ final class Engine: @unchecked Sendable {
         if raw.isContrastSupported { raw.contrastAmount = Float(s.nrContrast / 100) }
         if raw.isSharpnessSupported { raw.sharpnessAmount = 0 }
         if raw.isLensCorrectionSupported { raw.isLensCorrectionEnabled = s.lensProfile || s.removeCA }
+        raw.extendedDynamicRangeAmount = s.hdr ? 2 : 0
         guard let out = raw.outputImage?.normalized() else { return nil }
         if req.fresh { return (out, scale) }
         // Se cachea el RAW revelado: mover cualquier deslizador que no sea de RAW no vuelve a decodificar.
@@ -1021,16 +1042,22 @@ final class Engine: @unchecked Sendable {
     private func bitmapBase(_ req: Request) -> (CIImage, CGFloat)? {
         let url = req.url
         let full = Self.pixelSize(url)
+        let hdr = req.settings.hdr
         if req.fresh {
-            guard let img = CIImage(contentsOf: url, options: [.applyOrientationProperty: true]) else { return nil }
+            guard let img = Self.loadBitmap(url, hdr: hdr) else { return nil }
             return (img.normalized(), 1)
         }
         let maxPx = req.maxPixel.map { Int(($0 / 256).rounded(.up) * 256) } ?? 0
-        if let c = bitmapCache, c.url == url, c.maxPx == maxPx {
+        if let c = bitmapCache, c.url == url, c.maxPx == maxPx, c.hdr == hdr {
             return (c.image, c.image.extent.width / max(1, c.full.width))
         }
         var cg: CGImage?
-        if maxPx > 0, let src = CGImageSourceCreateWithURL(url as CFURL, nil) {
+        if hdr, let big = Self.loadBitmap(url, hdr: true)?.normalized() {
+            // Fotos con mapa de ganancia (iPhone, HEIC/JPEG HDR): se conservan las luces por encima del blanco
+            let k = maxPx > 0 ? min(1, CGFloat(maxPx) / max(big.extent.width, big.extent.height)) : 1
+            let small = big.transformed(by: CGAffineTransform(scaleX: k, y: k))
+            cg = ctx.createCGImage(small, from: small.extent.integral, format: .RGBAh, colorSpace: linearSpace)
+        } else if maxPx > 0, let src = CGImageSourceCreateWithURL(url as CFURL, nil) {
             let opts: [CFString: Any] = [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceThumbnailMaxPixelSize: maxPx,
@@ -1044,8 +1071,15 @@ final class Engine: @unchecked Sendable {
         }
         guard let cg else { return nil }
         let img = CIImage(cgImage: cg)
-        bitmapCache = (url, maxPx, img, full)
+        bitmapCache = (url, maxPx, hdr, img, full)
         return (img, img.extent.width / max(1, full.width))
+    }
+
+    private static func loadBitmap(_ url: URL, hdr: Bool) -> CIImage? {
+        if hdr, #available(macOS 15, *) {
+            return CIImage(contentsOf: url, options: [.applyOrientationProperty: true, .expandToHDR: true])
+        }
+        return CIImage(contentsOf: url, options: [.applyOrientationProperty: true])
     }
 
     static func pixelSize(_ url: URL) -> CGSize {
@@ -1200,11 +1234,16 @@ final class Engine: @unchecked Sendable {
         let size = max(0.5, (0.6 + s.grainSize / 100 * 3.0) * scale)
         let rough = s.grainRoughness / 100
         let k = s.grainAmount / 100 * (0.35 + (1 - rough) * 0.4)
-        let g = noise.redAsGray(1, 0)
+        let blurred = noise.redAsGray(1, 0)
             .transformed(by: CGAffineTransform(scaleX: size, y: size))
             .applyingGaussianBlur(sigma: (1 - rough) * size * 0.6 + 0.2)
-            .gainBias(k, 0.5 - 0.5 * k)
-            .cropped(to: e)
+        if limit > 1 {
+            // En HDR la luz suave recortaría las luces: el grano es un factor alrededor de 1 (0…2× la imagen).
+            // El ruido trae un alfa aleatorio: se hace opaco antes de la matriz de color, que si no lo divide y oscurece
+            let f = blurred.cropped(to: e).settingAlphaOne(in: e).gainBias(k, 0.5 - 0.5 * k)
+            return img.gainBias(2, 0).masked(over: img.gainBias(0, 0), mask: f)
+        }
+        let g = blurred.gainBias(k, 0.5 - 0.5 * k).cropped(to: e)
         return g.applyingFilter("CISoftLightBlendMode", parameters: [kCIInputBackgroundImageKey: img])
     }
 
@@ -1213,6 +1252,7 @@ final class Engine: @unchecked Sendable {
     func pipeline(_ req: Request) -> (CIImage, CGSize)? {
         guard var (img, scale) = base(req) else { return nil }
         let s = req.settings
+        limit = s.hdr ? CGFloat(pow(2, s.hdrHeadroom)) : 1
         img = img.normalized()
         if s.flipH { img = img.oriented(.upMirrored) }
         switch s.rotation90 & 3 {
@@ -1275,7 +1315,16 @@ final class Engine: @unchecked Sendable {
         if !LUTBuilder.isIdentity(s) {
             let key = LUTBuilder.key(s)
             if key != lutKey { lutData = LUTBuilder.build(s); lutKey = key }
-            img = applyCube(img, lutData, LUTBuilder.size)
+            if s.hdr {
+                // La LUT solo ve 0…1: se aplica al color normalizado por su canal máximo y luego se recupera ese exceso
+                let gain = img.applyingFilter("CIMaximumComponent").applyingFilter("CIColorClamp", parameters: [
+                    "inputMinComponents": CIVector(x: 1, y: 1, z: 1, w: 1),
+                    "inputMaxComponents": CIVector(x: limit, y: limit, z: limit, w: 1),
+                ])
+                img = applyCube(img.times(gain.reciprocal()), lutData, LUTBuilder.size).times(gain)
+            } else {
+                img = applyCube(img, lutData, LUTBuilder.size)
+            }
         }
 
         // Enfoque
@@ -1287,7 +1336,7 @@ final class Engine: @unchecked Sendable {
             if s.sharpMasking > 0 {
                 sharp = sharp.masked(over: img, mask: edgeMask(img, threshold: s.sharpMasking / 100, blur: max(1, 1.5 * scale)))
             }
-            img = sharp.luminance(over: img)
+            img = sharp.luminance(over: img, limit: limit)
         }
 
         // Efectos
@@ -1295,6 +1344,7 @@ final class Engine: @unchecked Sendable {
                        feather: s.vigFeather, highlights: s.vigHighlights)
         img = grain(img, s, scale)
 
+        if s.hdr { img = img.clamped(to: limit) }
         lastOverlay = overlay
         return (img.cropped(to: img.extent.integral), full)
     }
@@ -1324,7 +1374,7 @@ final class Engine: @unchecked Sendable {
                 let k = 0.035 * d
                 img = img.gainBias(1 / (1 - k), -k / (1 - k))
                     .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 1 + 0.3 * d, kCIInputContrastKey: 1 + 0.08 * d])
-                img = img.unsharp(60 * rel, 0.25 * d).luminance(over: img)
+                img = img.unsharp(60 * rel, 0.25 * d).luminance(over: img, limit: limit)
             } else {
                 let a = -d * 0.4
                 img = img.gainBias(1 - a, a * 0.55)
@@ -1334,12 +1384,12 @@ final class Engine: @unchecked Sendable {
         if clarity != 0 {
             let c = clarity / 100
             let local = c > 0 ? img.unsharp(20 * rel, 0.6 * c) : img.dissolve(to: img.blurred(8 * rel), -c * 0.6)
-            img = local.luminance(over: img)
+            img = local.luminance(over: img, limit: limit)
         }
         if texture != 0 {
             let t = texture / 100
             let local = t > 0 ? img.unsharp(max(0.8, 4 * scale), 0.9 * t) : img.dissolve(to: img.blurred(max(0.5, 2.5 * scale)), -t * 0.7)
-            img = local.luminance(over: img)
+            img = local.luminance(over: img, limit: limit)
         }
         return img
     }
@@ -1371,7 +1421,7 @@ final class Engine: @unchecked Sendable {
         if a.sharpness != 0 {
             let k = a.sharpness / 100
             let local = k > 0 ? img.unsharp(max(0.6, 1.2 * scale), 1.5 * k) : img.dissolve(to: img.blurred(max(0.5, 3 * scale)), -k)
-            img = local.luminance(over: img)
+            img = local.luminance(over: img, limit: limit)
         }
         if a.noise > 0 {
             img = img.clampedToExtent().applyingFilter("CINoiseReduction", parameters: [
@@ -1667,7 +1717,9 @@ final class Engine: @unchecked Sendable {
         let small = clean.transformed(by: CGAffineTransform(scaleX: k, y: k))
         let histCG = ctx.createCGImage(small, from: small.extent.integral, format: .RGBA8, colorSpace: sRGBSpace)
         let img = decorate(clean, req, overlay: overlay)
-        guard let cg = ctx.createCGImage(img, from: img.extent, format: .RGBA8, colorSpace: sRGBSpace) else { return nil }
+        let hdr = req.settings.hdr
+        guard let cg = ctx.createCGImage(img, from: img.extent, format: hdr ? .RGBAh : .RGBA8,
+                                         colorSpace: hdr ? extendedSRGBSpace : sRGBSpace) else { return nil }
         return Result(image: cg, histogramSource: histCG, fullSize: full, asShot: asShot(for: req.url))
     }
 
@@ -1678,6 +1730,23 @@ final class Engine: @unchecked Sendable {
         if abs(s - 1) > 1e-4 {
             img = img.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: s, kCIInputAspectRatioKey: 1]).normalized()
             img = img.cropped(to: img.extent.integral)
+        }
+        if req.settings.hdr {
+            if o.format == .heic {
+                // HEIC de 10 bits con curva PQ: conserva el HDR en pantallas y móviles compatibles
+                let props = Self.exportProperties(source: req.url, options: o)
+                let q = [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): o.quality]
+                try ctx.writeHEIF10Representation(of: img.settingProperties(props), to: url,
+                                                  colorSpace: CGColorSpace(name: CGColorSpace.displayP3_PQ)!, options: q)
+                return
+            }
+            // Resto de formatos (SDR): se comprimen las luces en lugar de recortarlas
+            let peak = Float(pow(2, req.settings.hdrHeadroom))
+            if #available(macOS 15, *) {
+                img = img.applyingFilter("CIToneMapHeadroom", parameters: ["inputSourceHeadroom": peak, "inputTargetHeadroom": Float(1)])
+            } else {
+                img = img.clamped(to: 1)
+            }
         }
         let deep = o.format == .tiff
         guard let cg = ctx.createCGImage(img, from: img.extent, format: deep ? .RGBA16 : .RGBA8, colorSpace: sRGBSpace),
@@ -4715,6 +4784,17 @@ struct BasicPanel: View {
                 Spacer()
             }
             HStack {
+                FieldLabel("HDR")
+                Toggle("Edición HDR", isOn: store.toggle(\.hdr, "HDR")).toggleStyle(MonoCheckbox())
+                Spacer()
+            }
+            if s.hdr {
+                LRSlider("Rango HDR", store.bind(\.hdrHeadroom), 1...4, def: 2, step: 0.1, decimals: 1, track: Tracks.gray)
+                HintText((NSScreen.main?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1) > 1
+                    ? "Las luces pueden superar el blanco hasta \(formatValue(s.hdrHeadroom, 1, false)) pasos. Exporta en HEIC para conservar el HDR; en JPEG, TIFF o PNG se comprimen las luces."
+                    : "Esta pantalla no muestra HDR: verás las luces recortadas, pero el HEIC exportado sí las conserva.")
+            }
+            HStack {
                 FieldLabel("Balance")
                 Menu {
                     Button("Como se tomó") { store.asShotWhiteBalance() }
@@ -5766,9 +5846,13 @@ struct ZoomedImage: View {
         GeometryReader { g in
             let d = store.displaySize(store.zoomLevel)
             let c = store.zoomCenter
-            Image(decorative: image, scale: 1)
-                .resizable()
-                .interpolation(store.zoomLevel >= 2 ? .none : .high)
+            Group {
+                if store.settings.hdr {
+                    EDRImage(image: image, nearest: store.zoomLevel >= 2)
+                } else {
+                    Image(decorative: image, scale: 1).resizable().interpolation(store.zoomLevel >= 2 ? .none : .high)
+                }
+            }
                 .frame(width: d.width, height: d.height)
                 .offset(x: (0.5 - c.x) * d.width, y: (0.5 - c.y) * d.height)
                 .frame(width: g.size.width, height: g.size.height)
@@ -5790,6 +5874,41 @@ struct ZoomedImage: View {
                 }
         }
         .clipped()
+    }
+}
+
+/// Imagen en una capa con EDR: muestra las luces HDR por encima del blanco (la Image de SwiftUI las recorta).
+struct EDRImage: NSViewRepresentable {
+    let image: CGImage
+    var nearest = false
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        v.wantsLayer = true
+        v.layer?.wantsExtendedDynamicRangeContent = true
+        v.layer?.contentsGravity = .resize
+        update(v)
+        return v
+    }
+
+    func updateNSView(_ v: NSView, context: Context) { update(v) }
+
+    private func update(_ v: NSView) {
+        v.layer?.contents = image
+        v.layer?.magnificationFilter = nearest ? .nearest : .linear
+    }
+}
+
+/// Foto del lienzo: en HDR va en una capa EDR, si no en una Image normal.
+struct PhotoImage: View {
+    @EnvironmentObject var store: Store
+    let image: CGImage
+    var body: some View {
+        if store.settings.hdr && !store.showBefore {
+            EDRImage(image: image).aspectRatio(CGFloat(image.width) / CGFloat(max(1, image.height)), contentMode: .fit)
+        } else {
+            Image(decorative: image, scale: 1).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+        }
     }
 }
 
@@ -5914,10 +6033,7 @@ struct CanvasView: View {
                     } else if store.splitActive, let before = store.beforePreview {
                         SplitCompare(after: cg, before: before).padding(28)
                     } else {
-                        Image(decorative: cg, scale: 1)
-                            .resizable()
-                            .interpolation(.high)
-                            .aspectRatio(contentMode: .fit)
+                        PhotoImage(image: cg)
                             .background(Color.black.shadow(color: .black.opacity(0.55), radius: 18, y: 4))
                             .overlay(ImageOverlay())
                             .padding(store.tool == .crop ? 40 : 28)
@@ -5964,6 +6080,7 @@ struct CanvasView: View {
     private var badges: [String] {
         var b: [String] = []
         if store.showBefore { b.append("Antes") }
+        if store.settings.hdr && !store.showBefore { b.append("HDR") }
         if store.activePointOverlay != nil { b.append("Rango del punto de color") }
         if store.zoomed && store.tool == .none { b.append("\(store.zoomPercent) %") }
         if !store.disabledGroups.isEmpty { b.append("Paneles desactivados: vista previa parcial") }
