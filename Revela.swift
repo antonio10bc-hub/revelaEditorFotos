@@ -6414,6 +6414,31 @@ struct LibraryGrid: View {
     }
 }
 
+/// Fondo de la barra superior que actúa como la barra de título de macOS (la ventana la oculta y Revela
+/// dibuja la suya): doble clic hace lo que diga Ajustes del Sistema (ampliar por defecto) y arrastrar mueve la ventana.
+struct TitleBarArea: NSViewRepresentable {
+    final class AreaView: NSView {
+        override var mouseDownCanMoveWindow: Bool { false }
+
+        override func mouseDown(with e: NSEvent) {
+            guard let w = window else { return }
+            if e.clickCount == 2 { Self.doubleClick(w) } else { w.performDrag(with: e) }
+        }
+
+        static func doubleClick(_ w: NSWindow) {
+            switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+            case "Minimize": w.miniaturize(nil)
+            case "None", "Do Nothing": break
+            case "Fill": if let f = w.screen?.visibleFrame { w.setFrame(f, display: true, animate: true) }
+            default: w.zoom(nil)
+            }
+        }
+    }
+
+    func makeNSView(context: Context) -> NSView { AreaView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
 struct TopBar: View {
     @EnvironmentObject var store: Store
     @AppStorage("showLeftPanel") private var showLeft = true
@@ -6447,7 +6472,7 @@ struct TopBar: View {
         .padding(.leading, 82)
         .padding(.trailing, 12)
         .frame(height: 40)
-        .background(Theme.window)
+        .background(ZStack { Theme.window; TitleBarArea() })
     }
 
     private func moduleButton(_ t: String, _ m: Store.Module, key: String) -> some View {
