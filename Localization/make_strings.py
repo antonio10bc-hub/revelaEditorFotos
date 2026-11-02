@@ -102,7 +102,7 @@ EN = {
     "Ajustes de máscara": "Mask adjustments", "Restablecer ajustes": "Reset adjustments",
     "Restablecer ajustes de máscara": "Reset mask adjustments", "Mostrar máscara": "Show mask", "Ocultar máscara": "Hide mask",
     "Activar / desactivar": "Enable / disable", "Borrar (o mantén ⌥)": "Erase (or hold ⌥)", "Borrar trazos": "Clear strokes",
-    "Flujo": "Flow", "Pinta sobre la foto para añadir zona a la máscara.": "Paint on the photo to add area to the mask.",
+    "Flujo": "Flow", "Pinta sobre la foto para añadir zona a la máscara. La rueda cambia el tamaño.": "Paint on the photo to add area to the mask. Scroll to change the size.",
     "Arrastra sobre la foto para trazar el degradado. El punto central lo mueve; los extremos ajustan la transición.":
         "Drag on the photo to draw the gradient. The center point moves it; the ends adjust the transition.",
     "Arrastra el centro para moverlo y los puntos del borde para cambiar su tamaño. Arrastra fuera para dibujar uno nuevo.":

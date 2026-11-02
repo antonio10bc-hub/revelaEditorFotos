@@ -3485,6 +3485,22 @@ final class Store: ObservableObject {
                 return true
             }
         }
+        // Pincel de máscara activo: la rueda sobre la foto cambia su tamaño
+        if e.type == .scrollWheel, module == .develop, tool == .mask, selectedMask?.kind == .brush, let win = e.window {
+            let loc = CGPoint(x: e.locationInWindow.x, y: (win.contentView?.bounds.height ?? 0) - e.locationInWindow.y)
+            if canvasFrame.contains(loc) {
+                if e.momentumPhase != [] { return true }
+                let dy = e.scrollingDeltaY != 0 ? e.scrollingDeltaY : e.scrollingDeltaX
+                let phys = e.isDirectionInvertedFromDevice ? -dy : dy
+                wheelAccum += e.hasPreciseScrollingDeltas ? phys / 4 : phys * 3
+                let steps = wheelAccum.rounded(.towardZero)
+                if steps != 0 {
+                    wheelAccum -= steps
+                    brushSize = min(max(brushSize + steps, 1), 100)
+                }
+                return true
+            }
+        }
         guard module == .develop, tool == .none, current != nil, let win = e.window,
               !splitActive, !sideBySideActive else {
             if e.type == .scrollWheel { lastPassScroll = Date() }
@@ -4803,7 +4819,7 @@ struct MaskPanel: View {
                     store.commit("Borrar trazos")
                 }
             }
-            HintText("Pinta sobre la foto para añadir zona a la máscara.")
+            HintText("Pinta sobre la foto para añadir zona a la máscara. La rueda cambia el tamaño.")
         case .linear:
             HintText("Arrastra sobre la foto para trazar el degradado. El punto central lo mueve; los extremos ajustan la transición.")
         case .subject, .people, .background:
