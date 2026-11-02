@@ -22,8 +22,8 @@ enum Theme {
     static let raised = Color(white: 0.135)
     static let separator = Color.white.opacity(0.07)
     static let text = Color(white: 0.88)
-    static let secondary = Color(white: 0.6)
-    static let dim = Color(white: 0.4)
+    static let secondary = Color(white: 0.68)
+    static let dim = Color(white: 0.53)
     static let accent = Color.white
     static let track = Color(white: 0.26)
     static let fill = Color.white.opacity(0.06)
@@ -98,6 +98,8 @@ struct EditSettings: Codable, Equatable {
     var highlights = 0.0, shadows = 0.0, whites = 0.0, blacks = 0.0
     var texture = 0.0, clarity = 0.0, dehaze = 0.0
     var vibrance = 0.0, saturation = 0.0
+    // HDR: edición con luces por encima del blanco SDR (rango en pasos)
+    var hdr = false, hdrHeadroom = 2.0
     // Curva de tonos
     var pcHighlights = 0.0, pcLights = 0.0, pcDarks = 0.0, pcShadows = 0.0
     var curveRGB = identityCurve, curveR = identityCurve, curveG = identityCurve, curveB = identityCurve
@@ -152,6 +154,63 @@ struct EditSettings: Codable, Equatable {
         r.heals = heals
         return r
     }
+}
+
+/// Grupos de ajustes que se restablecen o desactivan de una vez (paneles y subgrupos).
+enum AdjustGroup: String, CaseIterable {
+    case basic, whiteBalance, tone, presence, curve, color, grading, detail, sharpening, noise
+    case optics, geometry, effects, vignette, grain, calibration
+}
+
+extension EditSettings {
+    /// Estos ajustes con un grupo devuelto a sus valores por defecto.
+    func resetting(_ g: AdjustGroup, raw: Bool) -> EditSettings {
+        let d = EditSettings.defaults(raw: raw)
+        var s = self
+        switch g {
+        case .basic:
+            s = s.resetting(.whiteBalance, raw: raw).resetting(.tone, raw: raw).resetting(.presence, raw: raw)
+            s.profile = d.profile; s.hdr = d.hdr; s.hdrHeadroom = d.hdrHeadroom
+        case .whiteBalance: s.temp = d.temp; s.tint = d.tint
+        case .tone:
+            s.exposure = d.exposure; s.contrast = d.contrast; s.highlights = d.highlights
+            s.shadows = d.shadows; s.whites = d.whites; s.blacks = d.blacks
+        case .presence:
+            s.texture = d.texture; s.clarity = d.clarity; s.dehaze = d.dehaze; s.vibrance = d.vibrance; s.saturation = d.saturation
+        case .curve:
+            s.pcHighlights = d.pcHighlights; s.pcLights = d.pcLights; s.pcDarks = d.pcDarks; s.pcShadows = d.pcShadows
+            s.curveRGB = d.curveRGB; s.curveR = d.curveR; s.curveG = d.curveG; s.curveB = d.curveB
+        case .color:
+            s.hslHue = d.hslHue; s.hslSat = d.hslSat; s.hslLum = d.hslLum; s.bwMix = d.bwMix; s.pointColors = d.pointColors
+        case .grading:
+            s.gradeShadows = d.gradeShadows; s.gradeMidtones = d.gradeMidtones; s.gradeHighlights = d.gradeHighlights
+            s.gradeGlobal = d.gradeGlobal; s.gradeBlending = d.gradeBlending; s.gradeBalance = d.gradeBalance
+        case .detail: s = s.resetting(.sharpening, raw: raw).resetting(.noise, raw: raw)
+        case .sharpening:
+            s.sharpAmount = d.sharpAmount; s.sharpRadius = d.sharpRadius; s.sharpDetail = d.sharpDetail; s.sharpMasking = d.sharpMasking
+        case .noise:
+            s.nrLuminance = d.nrLuminance; s.nrDetail = d.nrDetail; s.nrContrast = d.nrContrast
+            s.nrColor = d.nrColor; s.nrColorDetail = d.nrColorDetail; s.nrColorSmooth = d.nrColorSmooth
+        case .optics:
+            s.removeCA = d.removeCA; s.lensProfile = d.lensProfile; s.distortion = d.distortion
+            s.lensVignette = d.lensVignette; s.lensVignetteMid = d.lensVignetteMid
+            s.defringePurple = d.defringePurple; s.defringeGreen = d.defringeGreen
+        case .geometry:
+            s.vertical = d.vertical; s.horizontal = d.horizontal; s.rotate = d.rotate; s.aspect = d.aspect
+            s.scale = d.scale; s.offsetX = d.offsetX; s.offsetY = d.offsetY
+        case .effects: s = s.resetting(.vignette, raw: raw).resetting(.grain, raw: raw)
+        case .vignette:
+            s.vigAmount = d.vigAmount; s.vigMidpoint = d.vigMidpoint; s.vigRoundness = d.vigRoundness
+            s.vigFeather = d.vigFeather; s.vigHighlights = d.vigHighlights
+        case .grain: s.grainAmount = d.grainAmount; s.grainSize = d.grainSize; s.grainRoughness = d.grainRoughness
+        case .calibration:
+            s.calShadowTint = d.calShadowTint; s.calRedHue = d.calRedHue; s.calRedSat = d.calRedSat
+            s.calGreenHue = d.calGreenHue; s.calGreenSat = d.calGreenSat; s.calBlueHue = d.calBlueHue; s.calBlueSat = d.calBlueSat
+        }
+        return s
+    }
+
+    func isModified(_ g: AdjustGroup, raw: Bool) -> Bool { resetting(g, raw: raw) != self }
 }
 
 // MARK: - Máscaras
@@ -1878,6 +1937,8 @@ final class Store: ObservableObject {
     @Published var brushFeather = 50.0
     @Published var brushFlow = 100.0
     @Published var brushErase = false
+    /// Paneles desactivados temporalmente con el ojo (solo afecta a la vista previa).
+    @Published var disabledGroups: Set<AdjustGroup> = [] { didSet { if disabledGroups != oldValue { scheduleRender() } } }
     // Punto de color
     @Published var selectedPointID: UUID? { didSet { if showPointRange { scheduleRender() } } }
     @Published var showPointRange = false { didSet { scheduleRender() } }
@@ -2064,6 +2125,7 @@ final class Store: ObservableObject {
         selectedHealID = nil
         selectedPointID = nil
         showPointRange = false
+        disabledGroups = []
         multiSelection.remove(id)
         beforePreview = nil
         beforeKey = nil
@@ -2099,7 +2161,7 @@ final class Store: ObservableObject {
         inFlight = true
         armBusy()
         let before = beforeSettings(photo)
-        let s = showBefore ? before : settings
+        let s = showBefore ? before : disabledGroups.reduce(settings) { $0.resetting($1, raw: photo.isRAW) }
         lastTarget = previewTarget
         let maxPx: CGFloat? = zoomed ? nil : previewTarget
         var req = Engine.Request(url: photo.url, isRAW: photo.isRAW, settings: s, maxPixel: maxPx,
@@ -2177,7 +2239,7 @@ final class Store: ObservableObject {
     }
 
     private func updateThumbnailFromPreview() {
-        guard !showBefore, tool != .crop, activeOverlay == nil, activePointOverlay == nil, !clipHigh, !clipLow,
+        guard !showBefore, tool != .crop, activeOverlay == nil, activePointOverlay == nil, !clipHigh, !clipLow, disabledGroups.isEmpty,
               let cg = preview, let i = currentIndex else { return }
         thumbDirty = false
         photos[i].thumbnail = ImageUtil.downscale(cg, max: 320)
@@ -2230,6 +2292,19 @@ final class Store: ObservableObject {
         guard let p = current else { return }
         settings = EditSettings.defaults(raw: p.isRAW)
         commit("Restablecer")
+    }
+
+    func resetGroup(_ g: AdjustGroup, _ name: String) {
+        guard let p = current else { return }
+        let s = settings.resetting(g, raw: p.isRAW)
+        guard s != settings else { return }
+        settings = s
+        disabledGroups.remove(g)
+        commit("Restablecer \(name)")
+    }
+
+    func toggleGroup(_ g: AdjustGroup) {
+        if disabledGroups.contains(g) { disabledGroups.remove(g) } else { disabledGroups.insert(g) }
     }
 
     func copySettings() { clipboard = settings; flash("Ajustes copiados") }
@@ -3217,12 +3292,24 @@ struct LRSlider: View {
 }
 
 struct SubHeader: View {
+    @EnvironmentObject var store: Store
     let title: String
     var trailing: AnyView? = nil
-    init(_ title: String, trailing: AnyView? = nil) { self.title = title; self.trailing = trailing }
+    var group: AdjustGroup? = nil
+    @Local private var hover = false
+    init(_ title: String, trailing: AnyView? = nil, reset group: AdjustGroup? = nil) {
+        self.title = title
+        self.trailing = trailing
+        self.group = group
+    }
     var body: some View {
         HStack(spacing: 6) {
-            Text(title.uppercased()).font(.system(size: 9.5, weight: .semibold)).tracking(0.8).foregroundColor(Theme.dim)
+            Text(title.uppercased()).font(.system(size: 10, weight: .semibold)).tracking(0.8)
+                .foregroundColor(group != nil && hover ? Theme.text : Theme.dim)
+                .contentShape(Rectangle())
+                .onHover { hover = $0 }
+                .onTapGesture(count: 2) { if let group { store.resetGroup(group, title.lowercased()) } }
+                .help(group != nil ? "Doble clic para restablecer \(title.lowercased())" : "")
             Spacer()
             if let trailing { trailing }
         }
@@ -3232,37 +3319,68 @@ struct SubHeader: View {
 }
 
 struct PanelSection<Content: View>: View {
+    @EnvironmentObject var store: Store
     let title: String
+    let group: AdjustGroup?
     @AppStorage private var open: Bool
+    @AppStorage("panels.solo") private var solo = false
     @Local private var hover = false
     let content: Content
 
-    init(_ title: String, open: Bool = true, @ViewBuilder content: () -> Content) {
+    /// Paneles de revelado de la derecha (para el modo solo).
+    static var developTitles: [String] {
+        ["Básico", "Curva de tonos", "Mezcla de colores", "Mezcla B/N", "Gradación de color", "Detalle", "Óptica",
+         "Geometría", "Efectos", "Calibración"]
+    }
+
+    init(_ title: String, open: Bool = true, group: AdjustGroup? = nil, @ViewBuilder content: () -> Content) {
         self.title = title
+        self.group = group
         self._open = AppStorage(wrappedValue: open, "panel." + title)
         self.content = content()
     }
 
     var body: some View {
+        let raw = store.current?.isRAW ?? false
+        let modified = group.map { store.settings.isModified($0, raw: raw) } ?? false
+        let disabled = group.map { store.disabledGroups.contains($0) } ?? false
         VStack(spacing: 0) {
-            Button { withAnimation(.easeInOut(duration: 0.22)) { open.toggle() } } label: {
-                HStack(spacing: 8) {
-                    Text(title)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(open || hover ? Theme.text : Theme.secondary)
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundColor(hover ? Theme.secondary : Theme.dim)
-                        .rotationEffect(.degrees(open ? 90 : 0))
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(disabled ? Theme.dim : (open || hover ? Theme.text : Theme.secondary))
+                    .strikethrough(disabled, color: Theme.dim)
+                if modified && !open { Circle().fill(Theme.secondary).frame(width: 4, height: 4) }
+                Spacer()
+                if let group, modified || disabled {
+                    headerIcon(disabled ? "eye.slash" : "eye", disabled ? "Activar el panel" : "Desactivar el panel para ver qué aporta",
+                               on: disabled || hover) { store.toggleGroup(group) }
                 }
-                .padding(.horizontal, 14)
-                .frame(height: 36)
-                .background(hover ? Color.white.opacity(0.025) : Color.clear)
-                .contentShape(Rectangle())
+                if let group, modified, hover {
+                    headerIcon("arrow.counterclockwise", "Restablecer \(title.lowercased())", on: true) {
+                        store.resetGroup(group, title.lowercased())
+                    }
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(hover ? Theme.secondary : Theme.dim)
+                    .rotationEffect(.degrees(open ? 90 : 0))
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 14)
+            .frame(height: 36)
+            .background(hover ? Color.white.opacity(0.025) : Color.clear)
+            .contentShape(Rectangle())
+            .onTapGesture { toggleOpen() }
             .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hover = h } }
+            .help(Self.developTitles.contains(title) ? "⌥-clic: abrir solo este panel" : "")
+            .contextMenu {
+                if Self.developTitles.contains(title) {
+                    Toggle("Modo solo (un panel abierto)", isOn: $solo)
+                    Divider()
+                    Button("Expandir todos") { for t in Self.developTitles { UserDefaults.standard.set(true, forKey: "panel." + t) } }
+                    Button("Contraer todos") { for t in Self.developTitles { UserDefaults.standard.set(false, forKey: "panel." + t) } }
+                }
+            }
             if open {
                 VStack(alignment: .leading, spacing: 6) { content }
                     .padding(.horizontal, 12)
@@ -3272,6 +3390,30 @@ struct PanelSection<Content: View>: View {
             }
             Rectangle().fill(Theme.separator).frame(height: 1)
         }
+    }
+
+    /// Clic: abre o cierra. ⌥-clic (o modo solo) deja abierto solo este panel.
+    private func toggleOpen() {
+        let only = NSEvent.modifierFlags.contains(.option) || (solo && !open)
+        withAnimation(.easeInOut(duration: 0.22)) {
+            if only && Self.developTitles.contains(title) {
+                for t in Self.developTitles where t != title { UserDefaults.standard.set(false, forKey: "panel." + t) }
+                open = true
+            } else {
+                open.toggle()
+            }
+        }
+    }
+
+    private func headerIcon(_ icon: String, _ help: String, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 10))
+                .foregroundColor(on ? Theme.text : Theme.dim)
+                .frame(width: 20, height: 20)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 }
 
@@ -3300,7 +3442,7 @@ struct HintText: View {
     let text: String
     init(_ text: String) { self.text = text }
     var body: some View {
-        Text(text).font(.system(size: 10.5)).foregroundColor(Theme.dim).fixedSize(horizontal: false, vertical: true)
+        Text(text).font(.system(size: 11)).foregroundColor(Theme.dim).fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -4017,7 +4159,7 @@ struct BasicPanel: View {
         let s = store.settings
         let raw = store.current?.isRAW ?? false
         let shot = store.current?.asShot
-        PanelSection("Básico") {
+        PanelSection("Básico", group: .basic) {
             HStack {
                 FieldLabel("Tratamiento")
                 Segmented(selection: Binding(get: { store.settings.profile == .mono }, set: { mono in
@@ -4062,7 +4204,7 @@ struct BasicPanel: View {
             LRSlider("Matiz", store.bind(\.tint), track: Tracks.tint,
                      display: raw && shot != nil ? formatValue((shot!.tint + s.tint * 1.5).rounded(), 0, true) : nil)
 
-            SubHeader("Tono", trailing: AnyView(SmallButton("Auto") { store.autoTone() }))
+            SubHeader("Tono", trailing: AnyView(SmallButton("Auto") { store.autoTone() }), reset: .tone)
             LRSlider("Exposición", store.bind(\.exposure), -5...5, step: 0.01, decimals: 2, track: Tracks.gray)
             LRSlider("Contraste", store.bind(\.contrast), track: Tracks.gray)
             LRSlider("Iluminaciones", store.bind(\.highlights), track: Tracks.gray)
@@ -4070,7 +4212,7 @@ struct BasicPanel: View {
             LRSlider("Blancos", store.bind(\.whites), track: Tracks.gray)
             LRSlider("Negros", store.bind(\.blacks), track: Tracks.gray)
 
-            SubHeader("Presencia")
+            SubHeader("Presencia", reset: .presence)
             LRSlider("Textura", store.bind(\.texture))
             LRSlider("Claridad", store.bind(\.clarity))
             LRSlider("Neblina", store.bind(\.dehaze))
@@ -4085,7 +4227,7 @@ struct ToneCurvePanel: View {
     @AppStorage("curveChannel") private var channel = 0
 
     var body: some View {
-        PanelSection("Curva de tonos") {
+        PanelSection("Curva de tonos", group: .curve) {
             Segmented(selection: $channel, options: [(0, "Param."), (1, "RGB"), (2, "R"), (3, "G"), (4, "B")])
             if channel == 0 {
                 ParametricCurveView(settings: store.settings, histogram: store.histogram).padding(.horizontal, 20)
@@ -4126,7 +4268,7 @@ struct HSLPanel: View {
 
     var body: some View {
         let mono = store.settings.profile == .mono
-        PanelSection(mono ? "Mezcla B/N" : "Mezcla de colores") {
+        PanelSection(mono ? "Mezcla B/N" : "Mezcla de colores", group: .color) {
             if mono {
                 ForEach(0..<8, id: \.self) { i in
                     LRSlider(hslNames[i], store.bindIndex(\.bwMix, i), track: [Color(white: 0.15), bandColor(i)])
@@ -4229,7 +4371,7 @@ struct ColorGradingPanel: View {
     private static let names = ["Sombras", "Medios tonos", "Iluminaciones", "Global"]
 
     var body: some View {
-        PanelSection("Gradación de color") {
+        PanelSection("Gradación de color", group: .grading) {
             Segmented(selection: $mode, options: [(0, "3 vías"), (1, "Sombras"), (2, "Medios"), (3, "Ilum."), (4, "Global")])
             if mode == 0 {
                 VStack(spacing: 8) {
@@ -4274,13 +4416,13 @@ struct ColorGradingPanel: View {
 struct DetailPanel: View {
     @EnvironmentObject var store: Store
     var body: some View {
-        PanelSection("Detalle") {
-            SubHeader("Enfoque")
+        PanelSection("Detalle", group: .detail) {
+            SubHeader("Enfoque", reset: .sharpening)
             LRSlider("Cantidad", store.bind(\.sharpAmount), 0...150)
             LRSlider("Radio", store.bind(\.sharpRadius), 0.5...3, def: 1, step: 0.1, decimals: 1)
             LRSlider("Detalle", store.bind(\.sharpDetail), 0...100, def: 25)
             LRSlider("Máscara", store.bind(\.sharpMasking), 0...100)
-            SubHeader("Reducción de ruido")
+            SubHeader("Reducción de ruido", reset: .noise)
             LRSlider("Luminancia", store.bind(\.nrLuminance), 0...100)
             LRSlider("Detalle", store.bind(\.nrDetail), 0...100, def: 50)
             LRSlider("Contraste", store.bind(\.nrContrast), 0...100)
@@ -4295,7 +4437,7 @@ struct OpticsPanel: View {
     @EnvironmentObject var store: Store
     var body: some View {
         let raw = store.current?.isRAW ?? false
-        PanelSection("Óptica") {
+        PanelSection("Óptica", group: .optics) {
             Toggle("Eliminar aberración cromática", isOn: store.toggle(\.removeCA, "Eliminar aberración cromática"))
                 .toggleStyle(MonoCheckbox())
             Toggle("Usar correcciones de perfil (RAW)", isOn: store.toggle(\.lensProfile, "Correcciones de perfil"))
@@ -4315,7 +4457,7 @@ struct OpticsPanel: View {
 struct GeometryPanel: View {
     @EnvironmentObject var store: Store
     var body: some View {
-        PanelSection("Geometría", open: false) {
+        PanelSection("Geometría", open: false, group: .geometry) {
             LRSlider("Vertical", store.bind(\.vertical))
             LRSlider("Horizontal", store.bind(\.horizontal))
             LRSlider("Girar", store.bind(\.rotate), -10...10, step: 0.1, decimals: 1)
@@ -4339,14 +4481,14 @@ struct GeometryPanel: View {
 struct EffectsPanel: View {
     @EnvironmentObject var store: Store
     var body: some View {
-        PanelSection("Efectos") {
-            SubHeader("Viñeta tras recorte")
+        PanelSection("Efectos", group: .effects) {
+            SubHeader("Viñeta tras recorte", reset: .vignette)
             LRSlider("Cantidad", store.bind(\.vigAmount), track: Tracks.gray)
             LRSlider("Punto medio", store.bind(\.vigMidpoint), 0...100, def: 50)
             LRSlider("Redondez", store.bind(\.vigRoundness))
             LRSlider("Desvanecer", store.bind(\.vigFeather), 0...100, def: 50)
             LRSlider("Iluminaciones", store.bind(\.vigHighlights), 0...100)
-            SubHeader("Granulado")
+            SubHeader("Granulado", reset: .grain)
             LRSlider("Cantidad", store.bind(\.grainAmount), 0...100)
             LRSlider("Tamaño", store.bind(\.grainSize), 0...100, def: 25)
             LRSlider("Aspereza", store.bind(\.grainRoughness), 0...100, def: 50)
@@ -4357,7 +4499,7 @@ struct EffectsPanel: View {
 struct CalibrationPanel: View {
     @EnvironmentObject var store: Store
     var body: some View {
-        PanelSection("Calibración", open: false) {
+        PanelSection("Calibración", open: false, group: .calibration) {
             SubHeader("Sombras")
             LRSlider("Matiz", store.bind(\.calShadowTint), track: Tracks.shadowTint)
             SubHeader("Primario rojo")
