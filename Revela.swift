@@ -1632,6 +1632,31 @@ final class Engine: @unchecked Sendable {
         return nil
     }
 
+    /// Geometría automática (como Upright): nivela y corrige la convergencia de las verticales.
+    /// Devuelve los valores de Vertical y Girar, o nil si no hay líneas verticales claras.
+    func autoGeometry(_ base: Request) -> (vertical: Double, rotate: Double)? {
+        var req = base
+        req.settings.horizontal = 0
+        var v = 0.0, r = 0.0
+        for pass in 0..<3 {
+            req.settings.vertical = v
+            req.settings.rotate = r
+            guard let img = analysisImage(req, maxPixel: 900), let fit = ImageUtil.verticalFit(img) else {
+                if pass == 0 { return nil }
+                break
+            }
+            if pass == 0 && fit.weight < 0.08 { return nil }
+            // Una línea en x (−0,5…0,5) inclinada k·x grados se endereza abriendo cada esquina h·tan(k)/2
+            let aspect = Double(img.height) / Double(img.width)
+            let dv = -fit.keystone * .pi / 180 * aspect / 0.6 * 100
+            let dr = -fit.tilt
+            v = CMath.clamp(v + dv, -100, 100)
+            r = CMath.clamp(r + dr, -10, 10)
+            if abs(dv) < 0.5 && abs(dr) < 0.05 { break }
+        }
+        return (v.rounded(), (r * 10).rounded() / 10)
+    }
+
     func render(_ req: Request) -> Result? {
         lastOverlay = nil
         guard let (clean, full) = pipeline(req) else { return nil }
@@ -1784,6 +1809,84 @@ enum ImageUtil {
     /// Giro aparente (grados) de las líneas casi horizontales o verticales y una confianza (pico / media).
     /// Usa el tensor de estructura: solo cuentan los bordes rectos y coherentes, no las texturas.
     static func lineTilt(_ cg: CGImage) -> (Double, Double)? {
+        let (w, h, jxx, jyy, jxy) = structureTensor(cg)
+        // Histograma de desviaciones respecto al eje más cercano, de −10° a 10° en pasos de 0,05°
+        let bins = 401
+        var hist = [Double](repeating: 0, count: bins)
+        for y in 4..<h - 4 {
+            for x in 4..<w - 4 {
+                guard let (ang, wt) = edge(jxx, jyy, jxy, y * w + x) else { continue }
+                var dev = ang.truncatingRemainder(dividingBy: 90)
+                if dev > 45 { dev -= 90 } else if dev < -45 { dev += 90 }
+                guard abs(dev) <= 10 else { continue }
+                hist[Int(((dev + 10) * 20).rounded())] += wt
+            }
+        }
+        var sm = [Double](repeating: 0, count: bins)
+        for i in 0..<bins {
+            var s = 0.0, ws = 0.0
+            for k in -8...8 where i + k >= 0 && i + k < bins {
+                let wt = exp(-Double(k * k) / 18)
+                s += hist[i + k] * wt
+                ws += wt
+            }
+            sm[i] = s / ws
+        }
+        guard let peak = sm.indices.max(by: { sm[$0] < sm[$1] }), sm[peak] > 0 else { return nil }
+        let mean = sm.reduce(0, +) / Double(bins)
+        var off = 0.0
+        if peak > 0 && peak < bins - 1 {
+            let a = sm[peak - 1], b = sm[peak], c = sm[peak + 1], d = a - 2 * b + c
+            if d != 0 { off = 0.5 * (a - c) / d }
+        }
+        return ((Double(peak) + off) / 20 - 10, sm[peak] / mean)
+    }
+
+    /// Ajuste de las líneas casi verticales: inclinación media (grados) y cuánto cambia de un borde
+    /// a otro de la foto (convergencia por perspectiva), más la confianza (peso de las verticales).
+    static func verticalFit(_ cg: CGImage) -> (tilt: Double, keystone: Double, weight: Double)? {
+        let (w, h, jxx, jyy, jxy) = structureTensor(cg)
+        var pts: [(x: Double, dev: Double, wt: Double)] = []
+        var total = 0.0
+        for y in 4..<h - 4 {
+            for x in 4..<w - 4 {
+                guard let (ang, wt) = edge(jxx, jyy, jxy, y * w + x) else { continue }
+                total += wt
+                // Gradiente casi horizontal = línea casi vertical
+                guard abs(ang) <= 15 else { continue }
+                pts.append((Double(x) / Double(w) - 0.5, ang, wt))
+            }
+        }
+        guard total > 0, pts.count > 50 else { return nil }
+        // Mínimos cuadrados ponderados de dev = a + k·x, descartando lo que se aleja más de 3° en una segunda pasada
+        var a = 0.0, k = 0.0
+        for pass in 0..<2 {
+            var sw = 0.0, sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0
+            for p in pts where pass == 0 || abs(p.dev - (a + k * p.x)) < 3 {
+                sw += p.wt; sx += p.wt * p.x; sy += p.wt * p.dev; sxx += p.wt * p.x * p.x; sxy += p.wt * p.x * p.dev
+            }
+            let det = sw * sxx - sx * sx
+            guard sw > 0, abs(det) > 1e-9 else { return nil }
+            k = (sw * sxy - sx * sy) / det
+            a = (sy - k * sx) / sw
+        }
+        let vw = pts.filter { abs($0.dev - (a + k * $0.x)) < 3 }.reduce(0) { $0 + $1.wt }
+        return (a, k, vw / total)
+    }
+
+    /// Ángulo del gradiente (grados, −90…90) y peso de un píxel de borde coherente.
+    private static func edge(_ jxx: [Float], _ jyy: [Float], _ jxy: [Float], _ i: Int) -> (Double, Double)? {
+        let a = Double(jxx[i]), b = Double(jyy[i]), c = Double(jxy[i])
+        let tr = a + b
+        guard tr > 1e4 else { return nil }
+        let diff = ((a - b) * (a - b) + 4 * c * c).squareRoot()
+        let coh = diff / tr
+        guard coh > 0.6 else { return nil }
+        return (0.5 * atan2(2 * c, a - b) * 180 / .pi, diff.squareRoot() * coh * coh)
+    }
+
+    /// Tensor de estructura (gradientes Sobel sumados en ventanas de 7×7) de la imagen en gris a ≤ 720 px.
+    private static func structureTensor(_ cg: CGImage) -> (Int, Int, [Float], [Float], [Float]) {
         let sc = min(1, 720 / Double(max(cg.width, cg.height)))
         let w = max(16, Int(Double(cg.width) * sc)), h = max(16, Int(Double(cg.height) * sc))
         var g = [UInt8](repeating: 0, count: w * h)
@@ -1827,42 +1930,7 @@ enum ImageUtil {
             return o
         }
         let jxx = box(xx), jyy = box(yy), jxy = box(xy)
-        // Histograma de desviaciones respecto al eje más cercano, de −10° a 10° en pasos de 0,05°
-        let bins = 401
-        var hist = [Double](repeating: 0, count: bins)
-        for y in 4..<h - 4 {
-            for x in 4..<w - 4 {
-                let i = y * w + x
-                let a = Double(jxx[i]), b = Double(jyy[i]), c = Double(jxy[i])
-                let tr = a + b
-                guard tr > 1e4 else { continue }
-                let diff = ((a - b) * (a - b) + 4 * c * c).squareRoot()
-                let coh = diff / tr
-                guard coh > 0.6 else { continue }
-                var ang = (0.5 * atan2(2 * c, a - b) * 180 / .pi).truncatingRemainder(dividingBy: 90)
-                if ang > 45 { ang -= 90 } else if ang < -45 { ang += 90 }
-                guard abs(ang) <= 10 else { continue }
-                hist[Int(((ang + 10) * 20).rounded())] += diff.squareRoot() * coh * coh
-            }
-        }
-        var sm = [Double](repeating: 0, count: bins)
-        for i in 0..<bins {
-            var s = 0.0, ws = 0.0
-            for k in -8...8 where i + k >= 0 && i + k < bins {
-                let wt = exp(-Double(k * k) / 18)
-                s += hist[i + k] * wt
-                ws += wt
-            }
-            sm[i] = s / ws
-        }
-        guard let peak = sm.indices.max(by: { sm[$0] < sm[$1] }), sm[peak] > 0 else { return nil }
-        let mean = sm.reduce(0, +) / Double(bins)
-        var off = 0.0
-        if peak > 0 && peak < bins - 1 {
-            let a = sm[peak - 1], b = sm[peak], c = sm[peak + 1], d = a - 2 * b + c
-            if d != 0 { off = 0.5 * (a - c) / d }
-        }
-        return ((Double(peak) + off) / 20 - 10, sm[peak] / mean)
+        return (w, h, jxx, jyy, jxy)
     }
 
     static func exifSummary(_ url: URL) -> (String, CGSize) {
@@ -2632,6 +2700,29 @@ final class Store: ObservableObject {
                 if abs(a - self.settings.cropAngle) < 0.05 { self.flash("La foto ya está recta"); return }
                 self.settings.cropAngle = a
                 self.commit("Enderezar automáticamente")
+            }
+        }
+    }
+
+    /// Geometría automática: endereza y corrige las verticales convergentes (como Upright Auto).
+    func autoGeometry() {
+        guard let photo = current else { return }
+        status = "Analizando líneas verticales…"
+        let req = Engine.Request(url: photo.url, isRAW: photo.isRAW, settings: settings)
+        let id = photo.id
+        renderQueue.async { [engine] in
+            let g = engine.autoGeometry(req)
+            DispatchQueue.main.async {
+                self.status = nil
+                guard self.selectedID == id else { return }
+                guard let g else { self.flash("No se han encontrado líneas verticales claras"); return }
+                var s = self.settings
+                s.vertical = g.vertical
+                s.horizontal = 0
+                s.rotate = g.rotate
+                guard s != self.settings else { self.flash("La geometría ya está recta"); return }
+                self.settings = s
+                self.commit("Geometría automática")
             }
         }
     }
@@ -4901,6 +4992,14 @@ struct GeometryPanel: View {
     @EnvironmentObject var store: Store
     var body: some View {
         PanelSection("Geometría", open: false, group: .geometry) {
+            HStack(spacing: 6) {
+                SmallButton("Auto", prominent: true) { store.autoGeometry() }
+                    .help("Nivela la foto y corrige las verticales que convergen (edificios)")
+                SmallButton("Nivelar") { store.autoStraighten() }
+                    .help("Solo endereza el horizonte o las líneas rectas")
+                Spacer()
+            }
+            .padding(.vertical, 2)
             LRSlider("Vertical", store.bind(\.vertical))
             LRSlider("Horizontal", store.bind(\.horizontal))
             LRSlider("Girar", store.bind(\.rotate), -10...10, step: 0.1, decimals: 1)
