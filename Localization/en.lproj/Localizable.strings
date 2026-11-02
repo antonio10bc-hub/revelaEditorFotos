@@ -259,6 +259,7 @@
 "Luz" = "Light";
 "Luz de día" = "Daylight";
 "Magenta" = "Magenta";
+"Manchas" = "Spots";
 "Manual" = "Manual";
 "Marcadas (%@)" = "Marked (%@)";
 "Marcar varias fotos" = "Mark several photos";
@@ -325,6 +326,7 @@
 "Ocultar paneles" = "Hide panels";
 "Ocultar paneles  (Tab)" = "Hide panels  (Tab)";
 "Opacidad" = "Opacity";
+"Orientación" = "Orientation";
 "Orientación del recorte" = "Crop orientation";
 "Original" = "Original";
 "Original + sufijo" = "Original + suffix";

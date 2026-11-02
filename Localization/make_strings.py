@@ -156,7 +156,7 @@ EN = {
     "Marcar varias fotos": "Mark several photos", "Ajuste fino": "Fine adjust", "Doble clic": "Double-click",
     "Restablecer un deslizador": "Reset a slider", "Z / espacio": "Z / space", "⌥ + arrastrar": "⌥ + drag",
     "⇧⌘I  ·  o arrástralas a la ventana": "⇧⌘I  ·  or drag them into the window", "⌘ / ⇧ + clic": "⌘ / ⇧ + click",
-    "Hecho": "Done",
+    "Hecho": "Done", "Manchas": "Spots", "Orientación": "Orientation",
     # Paneles: restablecer, ojo, modo solo
     "Doble clic para restablecer %@": "Double-click to reset %@",
     "Doble clic para restablecer · ⌥ + arrastrar para ajuste fino": "Double-click to reset · ⌥ + drag for fine adjustment",

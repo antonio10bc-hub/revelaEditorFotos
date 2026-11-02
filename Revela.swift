@@ -52,23 +52,33 @@ enum AppLanguage: String, CaseIterable, Identifiable {
 
 // MARK: - Tema
 
+/// Estilo "ficha técnica": líneas finas y opacas, esquinas rectas; lo seleccionado se invierte (gris claro,
+/// texto oscuro) y el verde queda solo para marcadores pequeños de activo o modificado.
 enum Theme {
-    static let window = Color(white: 0.075)
-    static let canvas = Color(white: 0.055)
-    static let panel = Color(white: 0.105)
-    static let raised = Color(white: 0.135)
-    static let separator = Color.white.opacity(0.07)
-    static let text = Color(white: 0.88)
-    static let secondary = Color(white: 0.68)
+    static let window = Color(red: 0.063, green: 0.067, blue: 0.067)
+    static let canvas = Color(red: 0.043, green: 0.047, blue: 0.047)
+    static let panel = Color(red: 0.075, green: 0.078, blue: 0.078)
+    static let raised = Color(red: 0.102, green: 0.106, blue: 0.106)
+    static let separator = Color(red: 0.165, green: 0.173, blue: 0.169)
+    static let rule = Color(red: 0.118, green: 0.125, blue: 0.122)
+    static let text = Color(red: 0.925, green: 0.933, blue: 0.914)
+    static let secondary = Color(white: 0.66)
     static let dim = Color(white: 0.53)
-    /// Amarillo verdoso eléctrico (el del icono): solo para lo seleccionado o activo.
-    static let accent = Color(red: 0.80, green: 1.0, blue: 0.10)
-    static let accentFill = Color(red: 0.80, green: 1.0, blue: 0.10).opacity(0.13)
-    static let onAccent = Color(white: 0.05)
-    static let border = Color.white.opacity(0.09)
-    static let track = Color(white: 0.26)
-    static let fill = Color.white.opacity(0.06)
-    static let selection = Color.white.opacity(0.10)
+    /// Selección: fondo gris claro con texto oscuro.
+    static let select = Color(red: 0.894, green: 0.902, blue: 0.882)
+    static let onSelect = Color(red: 0.067, green: 0.071, blue: 0.071)
+    /// Verde sutil: solo marcadores de activo / modificado.
+    static let accent = Color(red: 0.643, green: 0.784, blue: 0.4)
+    static let border = Color(red: 0.227, green: 0.235, blue: 0.231)
+    static let track = Color(red: 0.227, green: 0.235, blue: 0.231)
+    static let fill = Color.white.opacity(0.05)
+    static let selection = Color.white.opacity(0.08)
+}
+
+/// Cuadradito de 5 px en el verde de acento: marca lo activo o modificado.
+struct Marker: View {
+    var on = true
+    var body: some View { Rectangle().fill(on ? Theme.accent : Color.clear).frame(width: 5, height: 5) }
 }
 
 /// Pistas de color solo donde el color aporta información (temperatura, matiz, saturación, HSL…).
@@ -3592,8 +3602,8 @@ struct HoverBackground: ViewModifier {
     @Local private var isHover = false
     func body(content: Content) -> some View {
         content
-            .background(RoundedRectangle(cornerRadius: radius).fill(active ? Theme.accentFill : (isHover ? Theme.fill : Color.clear)))
-            .overlay(RoundedRectangle(cornerRadius: radius).stroke(Theme.accent.opacity(active ? 0.75 : 0), lineWidth: 1))
+            .background(Rectangle().fill(active ? Theme.raised : (isHover ? Theme.fill : Color.clear)))
+            .overlay(Rectangle().stroke(Theme.select.opacity(active ? 0.85 : 0), lineWidth: 1))
             .onHover { h in withAnimation(.easeOut(duration: 0.12)) { isHover = h } }
     }
 }
@@ -3624,13 +3634,13 @@ struct GhostButtonBody: View {
         let pressed = configuration.isPressed
         configuration.label
             .font(.system(size: compact ? 10.5 : 11.5, weight: prominent ? .semibold : .medium))
-            .foregroundColor(prominent ? Theme.onAccent : Theme.text)
+            .foregroundColor(prominent ? Theme.onSelect : Theme.text)
             .padding(.horizontal, compact ? 8 : 12)
             .padding(.vertical, compact ? 3 : 5)
-            .background(RoundedRectangle(cornerRadius: 4).fill(prominent
-                ? Theme.accent.opacity(pressed ? 0.7 : (hover ? 1 : 0.9))
-                : Color.white.opacity(pressed ? 0.18 : (hover ? 0.12 : 0.06))))
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(prominent ? Color.clear : Color.white.opacity(hover ? 0.2 : 0.12), lineWidth: 1))
+            .background(Rectangle().fill(prominent
+                ? Theme.select.opacity(pressed ? 0.75 : (hover ? 1 : 0.92))
+                : Color.white.opacity(pressed ? 0.12 : (hover ? 0.06 : 0))))
+            .overlay(Rectangle().stroke(prominent ? Color.clear : (hover ? Theme.secondary.opacity(0.6) : Theme.border), lineWidth: 1))
             .opacity(enabled ? 1 : 0.35)
             .scaleEffect(pressed ? 0.97 : 1)
             .contentShape(Rectangle())
@@ -3651,10 +3661,10 @@ struct IconButton: View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: size, weight: active ? .semibold : .regular))
-                .foregroundColor(active ? Theme.onAccent : (hover ? Theme.text : Theme.secondary))
+                .foregroundColor(active ? Theme.onSelect : (hover ? Theme.text : Theme.secondary))
                 .frame(width: 30, height: 26)
-                .background(RoundedRectangle(cornerRadius: 4).fill(active ? Theme.accent : (hover ? Theme.fill : Color.clear)))
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(active ? Theme.accent : (hover ? Theme.border : Color.clear), lineWidth: 1))
+                .background(Rectangle().fill(active ? Theme.select : (hover ? Theme.fill : Color.clear)))
+                .overlay(Rectangle().stroke(hover && !active ? Theme.border : Color.clear, lineWidth: 1))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -3669,24 +3679,22 @@ struct Segmented<T: Hashable>: View {
     let options: [(T, String)]
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 0) {
             ForEach(Array(options.enumerated()), id: \.offset) { _, opt in
                 let on = opt.0 == selection
                 Text(tr(opt.1))
                     .font(.system(size: 10.5, weight: on ? .semibold : .regular))
-                    .foregroundColor(on ? Theme.onAccent : Theme.secondary)
+                    .foregroundColor(on ? Theme.onSelect : Theme.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 3)
-                    .background(RoundedRectangle(cornerRadius: 3).fill(on ? Theme.accent : Color.clear))
+                    .background(Rectangle().fill(on ? Theme.select : Color.clear))
                     .contentShape(Rectangle())
-                    .onTapGesture { withAnimation(.easeOut(duration: 0.15)) { selection = opt.0 } }
+                    .onTapGesture { withAnimation(.easeOut(duration: 0.12)) { selection = opt.0 } }
             }
         }
-        .padding(2)
-        .background(RoundedRectangle(cornerRadius: 5).fill(Color.black.opacity(0.3)))
-        .overlay(RoundedRectangle(cornerRadius: 5).stroke(Theme.border, lineWidth: 1))
+        .overlay(Rectangle().stroke(Theme.border, lineWidth: 1))
     }
 }
 
@@ -3694,10 +3702,10 @@ struct MonoCheckbox: ToggleStyle {
     func makeBody(configuration: Configuration) -> some View {
         Button { withAnimation(.easeOut(duration: 0.12)) { configuration.isOn.toggle() } } label: {
             HStack(spacing: 7) {
-                RoundedRectangle(cornerRadius: 2.5)
-                    .fill(configuration.isOn ? Theme.accent : Color.clear)
-                    .overlay(RoundedRectangle(cornerRadius: 2.5).stroke(Color.white.opacity(configuration.isOn ? 0 : 0.4), lineWidth: 1))
-                    .overlay(Image(systemName: "checkmark").font(.system(size: 7.5, weight: .heavy)).foregroundColor(Theme.onAccent)
+                Rectangle()
+                    .fill(configuration.isOn ? Theme.select : Color.clear)
+                    .overlay(Rectangle().stroke(configuration.isOn ? Color.clear : Theme.secondary.opacity(0.6), lineWidth: 1))
+                    .overlay(Image(systemName: "checkmark").font(.system(size: 7.5, weight: .heavy)).foregroundColor(Theme.onSelect)
                         .opacity(configuration.isOn ? 1 : 0))
                     .frame(width: 13, height: 13)
                 configuration.label.font(.system(size: 11)).foregroundColor(Theme.text)
@@ -3712,7 +3720,8 @@ struct FieldLabel: View {
     let text: String
     init(_ text: String) { self.text = text }
     var body: some View {
-        Text(tr(text)).font(.system(size: 11)).foregroundColor(Theme.secondary).lineLimit(1).frame(width: 86, alignment: .trailing)
+        Text(tr(text).uppercased()).font(.system(size: 9.5, weight: .semibold)).tracking(0.7).foregroundColor(Theme.secondary)
+            .lineLimit(1).minimumScaleFactor(0.8).frame(width: 82, alignment: .leading)
     }
 }
 
@@ -3735,28 +3744,25 @@ struct SliderTrack: View {
             let d = CGFloat((min(max(defaultValue, range.lowerBound), range.upperBound) - range.lowerBound) / span)
             let active = start != nil
             ZStack(alignment: .leading) {
-                Capsule()
+                Rectangle()
                     .fill(track.map { AnyShapeStyle(LinearGradient(colors: $0, startPoint: .leading, endPoint: .trailing)) } ?? AnyShapeStyle(Theme.track))
-                    .frame(height: track == nil ? 2 : 3)
-                    .opacity(track == nil ? 1 : 0.8)
+                    .frame(height: track == nil ? 1 : 2)
+                    .opacity(track == nil ? 1 : 0.75)
                     .padding(.horizontal, 5)
                 if track == nil {
                     // Relleno desde el valor por defecto hasta el actual: se ve de un vistazo qué se ha tocado
-                    Capsule().fill(Theme.accent.opacity(0.85))
-                        .frame(width: abs(t - d) * (w - 10), height: 2)
+                    Rectangle().fill(Theme.text.opacity(0.8))
+                        .frame(width: abs(t - d) * (w - 10), height: 1)
                         .offset(x: 5 + min(t, d) * (w - 10))
                 }
                 if range.lowerBound < 0 && range.upperBound > 0 {
-                    Rectangle().fill(Color.white.opacity(0.22)).frame(width: 1, height: 6).offset(x: 5 + d * (w - 10) - 0.5)
+                    Rectangle().fill(Color.white.opacity(0.3)).frame(width: 1, height: 7).offset(x: 5 + d * (w - 10) - 0.5)
                 }
-                Circle()
-                    .fill(Color(white: active ? 1 : 0.9))
-                    .frame(width: 10, height: 10)
-                    .shadow(color: .black.opacity(0.6), radius: 1.5, y: 0.5)
-                    .scaleEffect(active ? 1.3 : (hover ? 1.12 : 1))
-                    .offset(x: t * (w - 10))
-                    .animation(.spring(response: 0.22, dampingFraction: 0.7), value: active)
-                    .animation(.easeOut(duration: 0.12), value: hover)
+                Rectangle()
+                    .fill(Color(white: active || hover ? 1 : 0.92))
+                    .frame(width: active ? 3 : 2, height: 11)
+                    .offset(x: 5 + t * (w - 10) - (active ? 1.5 : 1))
+                    .animation(.easeOut(duration: 0.1), value: active)
             }
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
@@ -3806,17 +3812,18 @@ struct ValueField: View {
 
     var body: some View {
         if let display {
-            Text(display).font(.system(size: 11).monospacedDigit()).foregroundColor(isDefault ? Theme.dim : Theme.text)
+            Text(display).font(.system(size: 10.5, design: .monospaced)).foregroundColor(isDefault ? Theme.dim : Theme.text)
                 .frame(maxWidth: .infinity, alignment: .trailing)
         } else {
             TextField("", text: $text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 11).monospacedDigit())
+                .font(.system(size: 10.5, design: .monospaced))
                 .multilineTextAlignment(.trailing)
                 .foregroundColor(focused ? .white : (isDefault ? Theme.dim : Theme.text))
                 .padding(.horizontal, 3)
                 .padding(.vertical, 1)
-                .background(RoundedRectangle(cornerRadius: 3).fill(focused ? Color.white.opacity(0.1) : Color.clear))
+                .background(Rectangle().fill(focused ? Color.white.opacity(0.08) : Color.clear))
+                .overlay(Rectangle().stroke(focused ? Theme.select.opacity(0.7) : Color.clear, lineWidth: 1))
                 .focused($focused)
                 .onAppear { text = formatValue(value, decimals, signed) }
                 .onChange(of: value) { _, v in if !focused { text = formatValue(v, decimals, signed) } }
@@ -3865,7 +3872,8 @@ struct LRSlider: View {
                 .font(.system(size: 11))
                 .foregroundColor(hover ? .white : (isDefault ? Theme.secondary : Theme.text))
                 .lineLimit(1)
-                .frame(width: 84, alignment: .trailing)
+                .minimumScaleFactor(0.85)
+                .frame(width: 82, alignment: .leading)
                 .contentShape(Rectangle())
                 .onTapGesture(count: 2) {
                     withAnimation(.easeOut(duration: 0.15)) { value = defaultValue }
@@ -3876,8 +3884,10 @@ struct LRSlider: View {
             ValueField(value: $value, range: range, decimals: decimals, signed: range.lowerBound < 0, isDefault: isDefault,
                        display: display, onCommit: commit)
                 .frame(width: 42)
+            Marker(on: !isDefault)
         }
-        .frame(height: 18)
+        .frame(height: 19)
+        .overlay(Rectangle().fill(Theme.rule).frame(height: 1), alignment: .top)
         .onHover { h in
             withAnimation(.easeOut(duration: 0.1)) { hover = h }
             if h {
@@ -3906,17 +3916,19 @@ struct SubHeader: View {
     }
     var body: some View {
         HStack(spacing: 6) {
-            Text(tr(title).uppercased()).font(.system(size: 10, weight: .semibold)).tracking(0.8)
-                .foregroundColor(group != nil && hover ? Theme.text : Theme.dim)
+            Text(tr(title).uppercased()).font(.system(size: 9.5, weight: .bold)).tracking(1)
+                .foregroundColor(group != nil && hover ? .white : Theme.text)
                 .contentShape(Rectangle())
                 .onHover { hover = $0 }
                 .onTapGesture(count: 2) { if let group { store.resetGroup(group, tr(title).lowercased()) } }
                 .help(group != nil ? tr("Doble clic para restablecer %@", tr(title).lowercased()) : "")
-            Rectangle().fill(Theme.border).frame(height: 1)
+            Spacer(minLength: 0)
             if let trailing { trailing }
         }
-        .padding(.top, 6)
-        .padding(.bottom, 1)
+        .padding(.top, 5)
+        .padding(.bottom, 2)
+        .overlay(Rectangle().fill(Theme.separator).frame(height: 1), alignment: .top)
+        .padding(.top, 4)
     }
 }
 
@@ -3948,12 +3960,17 @@ struct PanelSection<Content: View>: View {
         let disabled = group.map { store.disabledGroups.contains($0) } ?? false
         VStack(spacing: 0) {
             HStack(spacing: 8) {
+                if let n = Self.developTitles.firstIndex(of: title) {
+                    // "Mezcla de colores" y "Mezcla B/N" son el mismo panel: comparten número
+                    Text(String(format: "%02d", n >= 3 ? n : n + 1))
+                        .font(.system(size: 10, design: .monospaced)).foregroundColor(Theme.dim)
+                }
                 Text(tr(title))
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 12.5, weight: .semibold))
                     .foregroundColor(disabled ? Theme.dim : (open || hover ? Theme.text : Theme.secondary))
                     .strikethrough(disabled, color: Theme.dim)
-                if modified && !open { Circle().fill(Theme.secondary).frame(width: 4, height: 4) }
                 Spacer()
+                if modified && !disabled && !hover { Marker() }
                 if let group, modified || disabled {
                     headerIcon(disabled ? "eye.slash" : "eye", disabled ? "Activar el panel" : "Desactivar el panel para ver qué aporta",
                                on: disabled || hover) { store.toggleGroup(group) }
@@ -3968,9 +3985,9 @@ struct PanelSection<Content: View>: View {
                     .foregroundColor(hover ? Theme.secondary : Theme.dim)
                     .rotationEffect(.degrees(open ? 90 : 0))
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 10)
             .frame(height: 30)
-            .background(Color.white.opacity(hover ? 0.05 : 0.025))
+            .background(Color.white.opacity(hover ? 0.04 : 0))
             .contentShape(Rectangle())
             .onTapGesture { toggleOpen() }
             .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hover = h } }
@@ -4072,7 +4089,7 @@ struct HistogramView: View {
                             if let z = zone {
                                 Text(Self.zones[z].0).font(.system(size: 10, weight: .semibold)).foregroundColor(.white)
                                     .padding(.horizontal, 6).padding(.vertical, 2)
-                                    .background(Capsule().fill(Color.black.opacity(0.5)))
+                                    .background(Rectangle().fill(Color.black.opacity(0.6)))
                             }
                             Spacer()
                             clipButton(low: false)
@@ -4163,22 +4180,38 @@ struct HistogramView: View {
 struct ToolStrip: View {
     @EnvironmentObject var store: Store
     var body: some View {
-        HStack(spacing: 4) {
-            IconButton(icon: "crop", help: "Recortar y enderezar (R)", active: store.tool == .crop) { store.toggleTool(.crop) }
-            IconButton(icon: "bandage", help: "Eliminar manchas y objetos (Q)", active: store.tool == .heal) { store.toggleTool(.heal) }
-            IconButton(icon: "circle.dashed.inset.filled", help: "Máscaras (M)", active: store.tool == .mask) { store.toggleTool(.mask) }
-            IconButton(icon: "eyedropper", help: "Balance de blancos con cuentagotas (W)", active: store.tool == .whiteBalance) { store.toggleTool(.whiteBalance) }
-            Rectangle().fill(Theme.separator).frame(width: 1, height: 16).padding(.horizontal, 6)
-            IconButton(icon: "rotate.left", help: "Girar a la izquierda (⌘[)") { store.rotate(-1) }
-            IconButton(icon: "rotate.right", help: "Girar a la derecha (⌘])") { store.rotate(1) }
-            IconButton(icon: "arrow.left.and.right.righttriangle.left.righttriangle.right", help: "Voltear horizontal", active: store.settings.flipH) { store.flip() }
+        HStack(spacing: 0) {
+            cell("crop", "Recortar", "Recortar y enderezar (R)", .crop)
+            cell("bandage", "Manchas", "Eliminar manchas y objetos (Q)", .heal)
+            cell("circle.dashed.inset.filled", "Máscaras", "Máscaras (M)", .mask)
+            cell("eyedropper", "Balance", "Balance de blancos con cuentagotas (W)", .whiteBalance)
         }
-        .padding(.vertical, 7)
         .frame(maxWidth: .infinity)
+    }
+
+    /// Celda de herramienta: la activa se invierte (gris claro) y lleva el marcador verde.
+    private func cell(_ icon: String, _ label: String, _ help: String, _ t: Store.Tool) -> some View {
+        let on = store.tool == t
+        return Button { store.toggleTool(t) } label: {
+            VStack(spacing: 3) {
+                Image(systemName: icon).font(.system(size: 13, weight: on ? .semibold : .regular))
+                Text(tr(label).uppercased()).font(.system(size: 8.5, weight: on ? .bold : .medium)).tracking(0.6)
+                    .lineLimit(1).minimumScaleFactor(0.8)
+            }
+            .foregroundColor(on ? Theme.onSelect : Theme.secondary)
+            .frame(maxWidth: .infinity)
+            .frame(height: 40)
+            .background(on ? Theme.select : Color.clear)
+            .overlay(Marker(on: on).padding(5), alignment: .topTrailing)
+            .overlay(Rectangle().fill(Theme.separator).frame(width: 1), alignment: .trailing)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(tr(help))
     }
 }
 
-/// Bloque de la herramienta activa: enmarcado en el color de acento para que se distinga de los ajustes globales.
+/// Bloque de la herramienta activa: continúa su celda invertida (línea clara arriba) y se separa de los ajustes globales.
 struct ToolBlock<Content: View>: View {
     let title: String
     let icon: String
@@ -4194,23 +4227,19 @@ struct ToolBlock<Content: View>: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: icon).font(.system(size: 11, weight: .semibold)).foregroundColor(Theme.accent)
-                Text(tr(title).uppercased()).font(.system(size: 10.5, weight: .bold)).tracking(0.9).foregroundColor(Theme.accent)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(tr(title)).font(.system(size: 15, weight: .semibold)).foregroundColor(Theme.text)
                 Spacer()
                 SmallButton("Hecho", prominent: true, action: onDone)
             }
-            .padding(.horizontal, 12)
-            .frame(height: 34)
-            .background(Theme.accent.opacity(0.1))
-            .overlay(Rectangle().fill(Theme.accent.opacity(0.5)).frame(height: 1), alignment: .bottom)
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
             content
         }
-        .background(Color(white: 0.125))
-        .overlay(Rectangle().fill(Theme.accent).frame(width: 3), alignment: .leading)
-        .overlay(Rectangle().stroke(Theme.accent.opacity(0.55), lineWidth: 1))
-        .padding(.horizontal, 4)
-        .padding(.vertical, 4)
+        .background(Theme.raised)
+        .overlay(Rectangle().fill(Theme.select).frame(height: 3), alignment: .top)
+        .overlay(Rectangle().fill(Theme.separator).frame(height: 1), alignment: .bottom)
     }
 }
 
@@ -4232,7 +4261,7 @@ struct SectionDivider: View {
 struct CropPanel: View {
     @EnvironmentObject var store: Store
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
                 FieldLabel("Aspecto")
                 Picker("", selection: Binding(get: { store.cropAspect }, set: { store.setCropAspect($0) })) {
@@ -4246,14 +4275,24 @@ struct CropPanel: View {
                     .opacity(store.cropAspect == .free ? 0.4 : 1)
             }
             LRSlider("Ángulo", store.bind(\.cropAngle), -45...45, step: 0.1, decimals: 1)
-            HStack {
+            HStack(spacing: 4) {
+                FieldLabel("Orientación")
+                IconButton(icon: "rotate.left", help: "Girar a la izquierda (⌘[)") { store.rotate(-1) }
+                IconButton(icon: "rotate.right", help: "Girar a la derecha (⌘])") { store.rotate(1) }
+                IconButton(icon: "arrow.left.and.right.righttriangle.left.righttriangle.right", help: "Voltear horizontal",
+                           active: store.settings.flipH) { store.flip() }
+                Spacer()
+            }
+            HStack(spacing: 6) {
                 SmallButton("Enderezar auto") { store.autoStraighten() }
                     .help("Nivela el horizonte o las líneas rectas de la foto")
-                Spacer()
                 SmallButton("Restablecer recorte") { store.resetCrop() }
+                Spacer()
             }
         }
-        .padding(12)
+        .padding(.horizontal, 10)
+        .padding(.top, 4)
+        .padding(.bottom, 10)
     }
 }
 
@@ -5640,7 +5679,7 @@ struct ExportSheet: View {
         .padding(20)
         .frame(width: 500, height: 640)
         .background(Theme.panel)
-        .tint(Theme.accent)
+        .tint(Theme.select)
     }
 
     private var metadataHint: String {
@@ -5713,7 +5752,7 @@ struct LeftPanel: View {
                         if let label = store.navigatorLabel {
                             Text(label).font(.system(size: 9.5, weight: .medium)).foregroundColor(.white)
                                 .padding(.horizontal, 6).padding(.vertical, 2)
-                                .background(Capsule().fill(Color.black.opacity(0.6)))
+                                .background(Rectangle().fill(Color.black.opacity(0.7)))
                                 .padding(6)
                                 .transition(.opacity)
                         }
@@ -5778,9 +5817,9 @@ struct LeftPanel: View {
 
     private func zoomChip(_ t: String, active: Bool, action: @escaping () -> Void) -> some View {
         Text(t).font(.system(size: 10, weight: active ? .semibold : .regular).monospacedDigit())
-            .foregroundColor(active ? Theme.onAccent : Theme.secondary)
+            .foregroundColor(active ? Theme.onSelect : Theme.secondary)
             .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(RoundedRectangle(cornerRadius: 3).fill(active ? Theme.accent : Theme.fill))
+            .background(Rectangle().fill(active ? Theme.select : Theme.fill))
             .contentShape(Rectangle())
             .onTapGesture(perform: action)
     }
@@ -5818,8 +5857,8 @@ struct NavigatorImage: View {
                     let vw = min(1, store.viewport.width / max(1, d.width)), vh = min(1, store.viewport.height / max(1, d.height))
                     let c = store.zoomCenter
                     Rectangle()
-                        .stroke(Theme.accent, lineWidth: 1.5)
-                        .background(Rectangle().fill(Theme.accent.opacity(0.08)))
+                        .stroke(Theme.select, lineWidth: 1.5)
+                        .background(Rectangle().fill(Theme.select.opacity(0.06)))
                         .frame(width: vw * w, height: vh * h)
                         .offset(x: r.minX + (c.x - vw / 2) * w, y: r.minY + (c.y - vh / 2) * h)
                 }
@@ -6029,8 +6068,8 @@ struct CanvasBadge: View {
     var body: some View {
         Text(tr(text)).font(.system(size: 10.5, weight: .medium)).foregroundColor(.white)
             .padding(.horizontal, 9).padding(.vertical, 4)
-            .background(Capsule().fill(Color.black.opacity(0.62)))
-            .overlay(Capsule().stroke(Color.white.opacity(0.08)))
+            .background(Rectangle().fill(Color.black.opacity(0.72)))
+            .overlay(Rectangle().stroke(Theme.border, lineWidth: 1))
     }
 }
 
@@ -6043,8 +6082,8 @@ struct Toast: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(Capsule().fill(Color(white: 0.15).opacity(0.96)))
-        .overlay(Capsule().stroke(Color.white.opacity(0.1)))
+        .background(Rectangle().fill(Theme.raised.opacity(0.97)))
+        .overlay(Rectangle().stroke(Theme.border, lineWidth: 1))
         .shadow(color: .black.opacity(0.5), radius: 14, y: 4)
     }
 }
@@ -6175,12 +6214,12 @@ struct ThumbCell: View {
             HStack(spacing: 3) {
                 if photo.isRAW { tag("RAW") }
                 Spacer()
-                if photo.isEdited { Circle().fill(Color.white).frame(width: 5, height: 5).padding(2) }
+                if photo.isEdited { Marker().padding(2) }
             }
             .padding(4)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-        .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Theme.accent : Color.white.opacity(marked ? 0.7 : (hover ? 0.2 : 0.05)),
+        .clipShape(Rectangle())
+        .overlay(Rectangle().stroke(selected ? Theme.select : Color.white.opacity(marked ? 0.6 : (hover ? 0.2 : 0.05)),
                                                           lineWidth: selected ? 2 : (marked ? 1.5 : 1)))
         .opacity(selected || marked || hover ? 1 : 0.72)
         .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hover = h } }
@@ -6289,7 +6328,7 @@ struct TopBar: View {
                 }
             }
             Spacer()
-            HStack(spacing: 22) {
+            HStack(spacing: 0) {
                 moduleButton("Biblioteca", .library, key: "G")
                 moduleButton("Revelar", .develop, key: "D")
             }
@@ -6309,7 +6348,7 @@ struct TopBar: View {
         .padding(.leading, 82)
         .padding(.trailing, 12)
         .frame(height: 40)
-        .background(Color(white: 0.05))
+        .background(Theme.window)
     }
 
     private func moduleButton(_ t: String, _ m: Store.Module, key: String) -> some View {
@@ -6318,12 +6357,12 @@ struct TopBar: View {
             withAnimation(.easeInOut(duration: 0.2)) { store.module = m }
             if m == .develop { store.scheduleRender() }
         } label: {
-            VStack(spacing: 4) {
-                Text(tr(t)).font(.system(size: 12.5, weight: on ? .semibold : .regular)).foregroundColor(on ? .white : Theme.secondary)
-                Capsule().fill(Color.white).frame(width: on ? 18 : 0, height: 2).opacity(on ? 1 : 0)
-            }
-            .padding(.top, 6)
-            .contentShape(Rectangle())
+            Text(tr(t)).font(.system(size: 12, weight: on ? .semibold : .medium))
+                .foregroundColor(on ? Theme.onSelect : Theme.secondary)
+                .padding(.horizontal, 18)
+                .frame(height: 40)
+                .background(on ? Theme.select : Color.clear)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help("\(tr(t)) (\(key))")
@@ -6372,7 +6411,7 @@ struct BottomBar: View {
             if let p = store.exportProgress {
                 HStack(spacing: 6) {
                     Text(store.exportLabel).font(.system(size: 10.5).monospacedDigit()).foregroundColor(Theme.text)
-                    ProgressView(value: p).progressViewStyle(.linear).tint(Theme.accent).frame(width: 120)
+                    ProgressView(value: p).progressViewStyle(.linear).tint(Theme.select).frame(width: 120)
                     IconButton(icon: "xmark", help: "Cancelar la exportación", size: 9) { store.cancelExport() }
                 }
             }
@@ -6456,7 +6495,7 @@ struct PanelResizer: View {
 
     var body: some View {
         Rectangle()
-            .fill(hover || start != nil ? Theme.accent.opacity(0.6) : Color.black.opacity(0.55))
+            .fill(hover || start != nil ? Theme.select.opacity(0.6) : Theme.separator)
             .frame(width: hover || start != nil ? 2 : 1)
             .padding(.horizontal, 3)
             .contentShape(Rectangle())
