@@ -5758,6 +5758,19 @@ struct ColorGradingPanel: View {
         PanelSection("Gradación de color", group: .grading) {
             Segmented(selection: $mode, options: [(0, "3 vías"), (1, "Sombras"), (2, "Medios"), (3, "Ilum."), (4, "Global")])
             if mode == 0 {
+                HStack {
+                    SmallButton("Base") {
+                        // Punto de partida: sombras frías, medios cálidos y luces verdosas, todo al 10 %
+                        var g = store.settings
+                        g.gradeShadows.hue = 249; g.gradeShadows.sat = 10
+                        g.gradeMidtones.hue = 5; g.gradeMidtones.sat = 10
+                        g.gradeHighlights.hue = 120; g.gradeHighlights.sat = 10
+                        store.settings = g
+                        store.commit("Gradación base")
+                    }
+                    .help("Sombras 249° · medios 5° · iluminaciones 120°, saturación 10 en las tres")
+                    Spacer()
+                }
                 VStack(spacing: 8) {
                     wheelBlock(1, size: 104)
                     HStack(spacing: 20) {

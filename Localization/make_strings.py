@@ -157,6 +157,8 @@ EN = {
     "Restablecer un deslizador": "Reset a slider", "Z / espacio": "Z / space", "⌥ + arrastrar": "⌥ + drag",
     "⇧⌘I  ·  o arrástralas a la ventana": "⇧⌘I  ·  or drag them into the window", "⌘ / ⇧ + clic": "⌘ / ⇧ + click",
     "Hecho": "Done", "Manchas": "Spots", "Orientación": "Orientation",
+    "Base": "Base", "Gradación base": "Base grading",
+    "Sombras 249° · medios 5° · iluminaciones 120°, saturación 10 en las tres": "Shadows 249° · mids 5° · highlights 120°, saturation 10 on all three",
     "1 / 2": "1 / 2", "Panel anterior / siguiente": "Previous / next panel",
     # Ajustes preestablecidos (estilos de @antonio10bc)
     "Tierra ocre": "Ochre earth", "Bruma de valle": "Valley haze", "Hora azul": "Blue hour", "Neón nocturno": "Night neon",

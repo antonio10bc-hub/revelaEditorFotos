@@ -72,6 +72,7 @@
 "Balance de blancos con cuentagotas (W)" = "White balance eyedropper (W)";
 "Balance de blancos: %@" = "White balance: %@";
 "Balance de blancos: como se tomó" = "White balance: as shot";
+"Base" = "Base";
 "Biblioteca" = "Library";
 "Biblioteca  (G)" = "Library  (G)";
 "Biblioteca / Revelar" = "Library / Develop";
@@ -219,6 +220,7 @@
 "Girar a la izquierda" = "Rotate left";
 "Girar a la izquierda (⌘[)" = "Rotate left (⌘[)";
 "Global" = "Global";
+"Gradación base" = "Base grading";
 "Gradación de color" = "Color Grading";
 "Gradación: %@" = "Color grading: %@";
 "Granulado" = "Grain";
@@ -444,6 +446,7 @@
 "Solo endereza el horizonte o las líneas rectas" = "Only straightens the horizon or straight lines";
 "Sombra" = "Shade";
 "Sombras" = "Shadows";
+"Sombras 249° · medios 5° · iluminaciones 120°, saturación 10 en las tres" = "Shadows 249° · mids 5° · highlights 120°, saturation 10 on all three";
 "Suavidad" = "Smoothness";
 "Suavizado" = "Smoothness";
 "Subcarpeta (opcional)" = "Subfolder (optional)";
