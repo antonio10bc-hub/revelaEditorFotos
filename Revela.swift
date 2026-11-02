@@ -1023,7 +1023,14 @@ final class Engine: @unchecked Sendable {
         var nrL: Double, nrC: Double, nrS: Double, nrD: Double, nrK: Double, lens: Bool, hdr: Bool
     }
 
-    let ctx = CIContext(options: [.workingColorSpace: linearSpace, .workingFormat: CIFormat.RGBAh, .cacheIntermediates: false])
+    /// Se crea uno nuevo al cambiar de foto: Core Image guarda una reserva de texturas por cada tamaño de imagen
+    /// y, al recorrer muchas fotos seguidas, la memoria llegaba a 2–3 GB hasta que la soltaba sola.
+    private(set) var ctx = Engine.makeContext()
+    private var contextURL: URL?
+
+    private static func makeContext() -> CIContext {
+        CIContext(options: [.workingColorSpace: linearSpace, .workingFormat: CIFormat.RGBAh, .cacheIntermediates: false])
+    }
     private var rawFilters: [URL: (CIRAWFilter, WhitePoint)] = [:]
     private var rawCache: (key: RawKey, image: CIImage)?
     private var bitmapCache: (url: URL, maxPx: Int, hdr: Bool, image: CIImage, full: CGSize)?
@@ -1297,6 +1304,10 @@ final class Engine: @unchecked Sendable {
     // MARK: Pipeline
 
     func pipeline(_ req: Request) -> (CIImage, CGSize)? {
+        if req.url != contextURL {
+            if contextURL != nil { ctx = Self.makeContext() }
+            contextURL = req.url
+        }
         guard var (img, scale) = base(req) else { return nil }
         let s = req.settings
         limit = s.hdr ? CGFloat(pow(2, s.hdrHeadroom)) : 1
@@ -2181,6 +2192,27 @@ let wbPresets = [
     WBPreset(name: "Fluorescente", kelvin: 3800, tint: 21), WBPreset(name: "Flash", kelvin: 5500, tint: 0),
 ]
 
+/// Imágenes que llegan del revelado. Separadas del Store para que su llegada no redibuje los paneles.
+final class PreviewModel: ObservableObject {
+    @Published var preview: CGImage?
+    @Published var histogram: Histogram?
+    @Published var beforePreview: CGImage?
+    @Published var referencePreview: CGImage?
+    @Published var navigatorPreview: CGImage?
+    @Published var navigatorLabel: String?
+}
+
+/// Referencia al Store que NO suscribe la vista a sus cambios (a diferencia de @EnvironmentObject):
+/// para controles que solo lo usan para acciones y así no se redibujan con cada ajuste.
+private struct StoreRefKey: EnvironmentKey { static let defaultValue: Store? = nil }
+
+extension EnvironmentValues {
+    var storeRef: Store? {
+        get { self[StoreRefKey.self] }
+        set { self[StoreRefKey.self] = newValue }
+    }
+}
+
 /// Indicador compartido entre hilos para cancelar un trabajo en segundo plano.
 final class CancelFlag: @unchecked Sendable {
     private let lock = NSLock()
@@ -2205,8 +2237,11 @@ final class Store: ObservableObject {
     @Published var settings = EditSettings() {
         didSet { if !loading && settings != oldValue { scheduleRender() } }
     }
-    @Published var preview: CGImage?
-    @Published var histogram: Histogram?
+    /// Vista previa e histograma: en su propio objeto para que una imagen nueva solo redibuje el lienzo,
+    /// el histograma, la curva y el Navegador (no los ~100 deslizadores del panel derecho).
+    let previews = PreviewModel()
+    var preview: CGImage? { get { previews.preview } set { previews.preview = newValue } }
+    var histogram: Histogram? { get { previews.histogram } set { previews.histogram = newValue } }
     @Published var module: Module = .develop
     @Published var tool: Tool = .none { didSet { if tool != oldValue { scheduleRender() } } }
     @Published var showBefore = false { didSet { scheduleRender() } }
@@ -2227,7 +2262,7 @@ final class Store: ObservableObject {
     // Comparación, avisos y visualización
     @Published var splitView = false { didSet { scheduleRender() } }
     @Published var splitPosition = 0.5
-    @Published var beforePreview: CGImage?
+    var beforePreview: CGImage? { get { previews.beforePreview } set { previews.beforePreview = newValue } }
     @Published var clipHigh = false { didSet { scheduleRender() } }
     @Published var clipLow = false { didSet { scheduleRender() } }
     @Published var busy = false
@@ -2235,10 +2270,10 @@ final class Store: ObservableObject {
     @Published var sideBySide = false { didSet { scheduleRender() } }
     @Published var compareReference = false { didSet { scheduleRender() } }
     @Published var referenceID: UUID? { didSet { referencePreview = nil; referenceKey = nil; scheduleRender() } }
-    @Published var referencePreview: CGImage?
+    var referencePreview: CGImage? { get { previews.referencePreview } set { previews.referencePreview = newValue } }
     private var referenceKey: BeforeKey?
-    @Published var navigatorPreview: CGImage?
-    @Published var navigatorLabel: String?
+    var navigatorPreview: CGImage? { get { previews.navigatorPreview } set { previews.navigatorPreview = newValue } }
+    var navigatorLabel: String? { get { previews.navigatorLabel } set { previews.navigatorLabel = newValue } }
     @Published var showShortcuts = false
     @Published var panelsHidden = false
     // Herramienta Eliminar
@@ -2282,6 +2317,13 @@ final class Store: ObservableObject {
     private let renderQueue = DispatchQueue(label: "revela.render", qos: .userInteractive)
     private let exportQueue = DispatchQueue(label: "revela.export", qos: .userInitiated)
     private let thumbQueue = DispatchQueue(label: "revela.thumbs", qos: .utility)
+    /// Miniaturas al importar o arrancar: 3 colas con su propio motor para generar varias a la vez.
+    private let thumbLoaders = (0..<3).map { (DispatchQueue(label: "revela.thumbload.\($0)", qos: .utility), Engine()) }
+    private var thumbLoaderNext = 0
+    /// Vista previa al pasar por un ajuste preestablecido: cola propia y solo cuenta la última petición.
+    private let hoverQueue = DispatchQueue(label: "revela.hover", qos: .userInitiated)
+    private let hoverEngine = Engine()
+    private var hoverWork: DispatchWorkItem?
 
     init() {
         loadCatalog()
@@ -2369,17 +2411,22 @@ final class Store: ObservableObject {
 
     private func loadThumbnail(_ p: Photo) {
         let id = p.id, url = p.url, raw = p.isRAW, settings = p.settings, edited = p.isEdited
-        thumbQueue.async { [thumbEngine] in
+        let (queue, engine) = thumbLoaders[thumbLoaderNext % thumbLoaders.count]
+        thumbLoaderNext += 1
+        queue.async {
             let (exif, size) = ImageUtil.exifSummary(url)
             var thumb = ImageUtil.embeddedThumbnail(url, max: 320)
             if edited {
-                thumb = thumbEngine.render(Engine.Request(url: url, isRAW: raw, settings: settings, maxPixel: 320))?.image ?? thumb
+                thumb = engine.render(Engine.Request(url: url, isRAW: raw, settings: settings, maxPixel: 320))?.image ?? thumb
             }
             DispatchQueue.main.async {
                 guard let i = self.photos.firstIndex(where: { $0.id == id }) else { return }
-                self.photos[i].exif = exif
-                self.photos[i].pixelSize = size
-                if self.photos[i].thumbnail == nil || edited { self.photos[i].thumbnail = thumb }
+                // Un solo cambio por foto: cada cambio en `photos` redibuja la ventana
+                var ph = self.photos[i]
+                ph.exif = exif
+                ph.pixelSize = size
+                if ph.thumbnail == nil || edited { ph.thumbnail = thumb }
+                self.photos[i] = ph
             }
         }
     }
@@ -2496,7 +2543,7 @@ final class Store: ObservableObject {
                 if self.selectedID == id, let r = result {
                     self.preview = r.image
                     if let hist { self.histogram = hist }
-                    self.fullSize = r.fullSize
+                    if self.fullSize != r.fullSize { self.fullSize = r.fullSize }
                     if let b = beforeImage { self.beforePreview = b }
                     if let i = self.currentIndex, self.photos[i].asShot == nil, let a = r.asShot { self.photos[i].asShot = a }
                 }
@@ -2505,7 +2552,7 @@ final class Store: ObservableObject {
                     self.scheduleRender()
                 } else {
                     self.busyWork?.cancel()
-                    self.busy = false
+                    if self.busy { self.busy = false }
                     if self.thumbDirty { self.updateThumbnailFromPreview() }
                 }
             }
@@ -2559,10 +2606,14 @@ final class Store: ObservableObject {
         }
         navigatorLabel = label
         let req = Engine.Request(url: photo.url, isRAW: photo.isRAW, settings: make(settings), maxPixel: 420)
-        thumbQueue.async { [thumbEngine] in
-            let img = thumbEngine.render(req)?.image
+        // Al recorrer la lista deprisa, las peticiones que aún no han empezado se descartan
+        hoverWork?.cancel()
+        let w = DispatchWorkItem { [hoverEngine] in
+            let img = hoverEngine.render(req)?.image
             DispatchQueue.main.async { if token == self.hoverToken { self.navigatorPreview = img } }
         }
+        hoverWork = w
+        hoverQueue.async(execute: w)
     }
 
     private func updateThumbnailFromPreview() {
@@ -3840,10 +3891,43 @@ struct ValueField: View {
     }
 }
 
+/// Deslizador con etiqueta y valor. Solo se redibuja si cambian sus datos (valor, rango, etiqueta…),
+/// no con cada ajuste de otro deslizador: es lo que más pesaba al arrastrar.
 struct LRSlider: View {
-    @EnvironmentObject var store: Store
+    let label: String
+    let value: Binding<Double>
+    let range: ClosedRange<Double>
+    let defaultValue: Double
+    let step: Double
+    let decimals: Int
+    let track: [Color]?
+    let display: String?
+
+    init(_ label: String, _ value: Binding<Double>, _ range: ClosedRange<Double> = -100...100, def: Double = 0,
+         step: Double = 1, decimals: Int = 0, track: [Color]? = nil, display: String? = nil) {
+        self.label = label
+        self.value = value
+        self.range = range
+        self.defaultValue = def
+        self.step = step
+        self.decimals = decimals
+        self.track = track
+        self.display = display
+    }
+
+    var body: some View {
+        LRSliderRow(label: label, value: value, current: value.wrappedValue, range: range, defaultValue: defaultValue,
+                    step: step, decimals: decimals, track: track, display: display)
+            .equatable()
+    }
+}
+
+struct LRSliderRow: View, Equatable {
+    @Environment(\.storeRef) private var store
     let label: String
     @Binding var value: Double
+    /// Valor en el momento de construir la fila: es lo que se compara (el Binding no es comparable).
+    let current: Double
     let range: ClosedRange<Double>
     let defaultValue: Double
     let step: Double
@@ -3852,18 +3936,6 @@ struct LRSlider: View {
     let display: String?
     @Local private var hover = false
     @Local private var token = UUID()
-
-    init(_ label: String, _ value: Binding<Double>, _ range: ClosedRange<Double> = -100...100, def: Double = 0,
-         step: Double = 1, decimals: Int = 0, track: [Color]? = nil, display: String? = nil) {
-        self.label = label
-        self._value = value
-        self.range = range
-        self.defaultValue = def
-        self.step = step
-        self.decimals = decimals
-        self.track = track
-        self.display = display
-    }
 
     var body: some View {
         let isDefault = abs(value - defaultValue) < step / 2
@@ -3892,15 +3964,20 @@ struct LRSlider: View {
             withAnimation(.easeOut(duration: 0.1)) { hover = h }
             if h {
                 let b = $value
-                store.setHoverSlider(Store.HoverSlider(id: token, get: { b.wrappedValue }, set: { b.wrappedValue = $0 },
+                store?.setHoverSlider(Store.HoverSlider(id: token, get: { b.wrappedValue }, set: { b.wrappedValue = $0 },
                                                        range: range, step: step, commit: commit))
-            } else if store.hoverSlider?.id == token {
-                store.setHoverSlider(nil)
+            } else if store?.hoverSlider?.id == token {
+                store?.setHoverSlider(nil)
             }
         }
     }
 
-    private func commit() { store.commit("\(tr(label)) \(formatValue(value, decimals, range.lowerBound < 0))") }
+    static func == (a: LRSliderRow, b: LRSliderRow) -> Bool {
+        a.label == b.label && a.current == b.current && a.range == b.range && a.defaultValue == b.defaultValue
+            && a.step == b.step && a.decimals == b.decimals && a.track == b.track && a.display == b.display
+    }
+
+    private func commit() { store?.commit("\(tr(label)) \(formatValue(value, decimals, range.lowerBound < 0))") }
 }
 
 struct SubHeader: View {
@@ -4070,6 +4147,7 @@ struct HintText: View {
 
 struct HistogramView: View {
     @EnvironmentObject var store: Store
+    @EnvironmentObject var pv: PreviewModel
     @Local private var zone: Int?
     @Local private var startValue = 0.0
     private static let zones: [(String, WritableKeyPath<EditSettings, Double>, Double, ClosedRange<Double>)] = [
@@ -4134,7 +4212,7 @@ struct HistogramView: View {
     }
 
     private func clipButton(low: Bool) -> some View {
-        let clipped = low ? store.histogram?.clipLow == true : store.histogram?.clipHigh == true
+        let clipped = low ? pv.histogram?.clipLow == true : pv.histogram?.clipHigh == true
         let on = low ? store.clipLow : store.clipHigh
         return Button {
             if low { store.clipLow.toggle() } else { store.clipHigh.toggle() }
@@ -4161,7 +4239,7 @@ struct HistogramView: View {
             ctx.stroke(Path { p in p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: size.height)) },
                        with: .color(.white.opacity(0.05)))
         }
-        guard let h = store.histogram else { return }
+        guard let h = pv.histogram else { return }
         var c = ctx
         c.blendMode = .plusLighter
         for (arr, col) in [(h.r, Color(red: 0.85, green: 0.22, blue: 0.22)), (h.g, Color(red: 0.25, green: 0.75, blue: 0.3)), (h.b, Color(red: 0.3, green: 0.45, blue: 0.95))] {
@@ -4914,13 +4992,14 @@ struct BasicPanel: View {
 
 struct ToneCurvePanel: View {
     @EnvironmentObject var store: Store
+    @EnvironmentObject var pv: PreviewModel
     @AppStorage("curveChannel") private var channel = 0
 
     var body: some View {
         PanelSection("Curva de tonos", group: .curve) {
             Segmented(selection: $channel, options: [(0, "Param."), (1, "RGB"), (2, "R"), (3, "G"), (4, "B")])
             if channel == 0 {
-                ParametricCurveView(settings: store.settings, histogram: store.histogram).padding(.horizontal, 20)
+                ParametricCurveView(settings: store.settings, histogram: pv.histogram).padding(.horizontal, 20)
                 SubHeader("Región")
                 LRSlider("Iluminaciones", store.bind(\.pcHighlights))
                 LRSlider("Claros", store.bind(\.pcLights))
@@ -4928,7 +5007,7 @@ struct ToneCurvePanel: View {
                 LRSlider("Sombras", store.bind(\.pcShadows))
             } else {
                 CurveEditor(points: curveBinding, color: [Color.white, .white, .red, .green, Color(red: 0.4, green: 0.55, blue: 1)][channel],
-                            histogram: store.histogram) { store.commit("Curva de tonos") }
+                            histogram: pv.histogram) { store.commit("Curva de tonos") }
                     .padding(.horizontal, 20)
                 HStack {
                     Spacer()
@@ -5740,16 +5819,17 @@ struct ExportSheet: View {
 
 struct LeftPanel: View {
     @EnvironmentObject var store: Store
+    @EnvironmentObject var pv: PreviewModel
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
                 PanelSection("Navegador") {
                     ZStack(alignment: .bottomLeading) {
                         RoundedRectangle(cornerRadius: 5).fill(Color(white: 0.06))
-                        if let cg = store.navigatorPreview ?? store.preview {
-                            NavigatorImage(image: cg, interactive: store.navigatorPreview == nil)
+                        if let cg = pv.navigatorPreview ?? pv.preview {
+                            NavigatorImage(image: cg, interactive: pv.navigatorPreview == nil)
                         }
-                        if let label = store.navigatorLabel {
+                        if let label = pv.navigatorLabel {
                             Text(label).font(.system(size: 9.5, weight: .medium)).foregroundColor(.white)
                                 .padding(.horizontal, 6).padding(.vertical, 2)
                                 .background(Rectangle().fill(Color.black.opacity(0.7)))
@@ -5758,7 +5838,7 @@ struct LeftPanel: View {
                         }
                     }
                     .frame(height: 140)
-                    .animation(.easeOut(duration: 0.15), value: store.navigatorLabel)
+                    .animation(.easeOut(duration: 0.15), value: pv.navigatorLabel)
                     HStack(spacing: 2) {
                         zoomChip("Encajar", active: !store.zoomed) { store.zoomed = false }
                         ForEach([0.5, 1.0, 2.0], id: \.self) { l in
@@ -5793,21 +5873,7 @@ struct LeftPanel: View {
                     }
                 }
                 PanelSection("Historial") {
-                    if let h = store.history {
-                        VStack(spacing: 1) {
-                            ForEach(Array(h.entries.enumerated()).reversed(), id: \.element.id) { i, e in
-                                Text(tr(e.name))
-                                    .font(.system(size: 11, weight: i == h.index ? .semibold : .regular))
-                                    .foregroundColor(i == h.index ? .white : (i > h.index ? Theme.dim : Theme.text))
-                                    .lineLimit(1)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.horizontal, 8).padding(.vertical, 4)
-                                    .hoverBackground(radius: 4, active: i == h.index)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture { store.jumpHistory(i) }
-                            }
-                        }
-                    }
+                    if let h = store.history { HistoryList(state: h).equatable() }
                 }
             }
         }
@@ -5834,6 +5900,33 @@ struct LeftPanel: View {
             .hoverBackground(radius: 4)
             .contentShape(Rectangle())
             .onTapGesture(perform: action)
+    }
+}
+
+/// Historial de la foto abierta. Equatable: solo se redibuja cuando cambia el historial, no con cada
+/// movimiento de un deslizador (con historiales largos llegaba a pesar).
+struct HistoryList: View, Equatable {
+    @Environment(\.storeRef) private var store
+    let state: HistoryState
+
+    static func == (a: HistoryList, b: HistoryList) -> Bool {
+        a.state.index == b.state.index && a.state.entries.map(\.id) == b.state.entries.map(\.id)
+    }
+
+    var body: some View {
+        VStack(spacing: 1) {
+            ForEach(Array(state.entries.enumerated()).reversed(), id: \.element.id) { i, e in
+                Text(tr(e.name))
+                    .font(.system(size: 11, weight: i == state.index ? .semibold : .regular))
+                    .foregroundColor(i == state.index ? .white : (i > state.index ? Theme.dim : Theme.text))
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .hoverBackground(radius: 4, active: i == state.index)
+                    .contentShape(Rectangle())
+                    .onTapGesture { store?.jumpHistory(i) }
+            }
+        }
     }
 }
 
@@ -6090,23 +6183,24 @@ struct Toast: View {
 
 struct CanvasView: View {
     @EnvironmentObject var store: Store
+    @EnvironmentObject var pv: PreviewModel
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 Theme.canvas
-                if store.current?.missing != true, let cg = store.preview ?? store.current?.thumbnail {
+                if store.current?.missing != true, let cg = pv.preview ?? store.current?.thumbnail {
                     if store.zoomed && store.tool == .none {
                         ZoomedImage(image: cg)
                     } else if store.sideBySideActive {
                         if store.compareReference {
                             let ref = store.photos.first { $0.id == store.referenceID }
-                            SideBySide(after: cg, before: ref == nil ? nil : store.referencePreview,
+                            SideBySide(after: cg, before: ref == nil ? nil : pv.referencePreview,
                                        leftLabel: ref.map { tr("Referencia · %@", $0.name) } ?? "Elige una referencia (clic derecho en la tira)",
                                        rightLabel: "Actual").padding(20)
                         } else {
-                            SideBySide(after: cg, before: store.beforePreview, leftLabel: "Antes", rightLabel: "Después").padding(20)
+                            SideBySide(after: cg, before: pv.beforePreview, leftLabel: "Antes", rightLabel: "Después").padding(20)
                         }
-                    } else if store.splitActive, let before = store.beforePreview {
+                    } else if store.splitActive, let before = pv.beforePreview {
                         SplitCompare(after: cg, before: before).padding(28)
                     } else {
                         PhotoImage(image: cg)
@@ -6191,11 +6285,16 @@ struct EmptyState: View {
     }
 }
 
-struct ThumbCell: View {
+/// Miniatura de la tira y la biblioteca. Equatable: no se redibuja con cada ajuste de la foto abierta.
+struct ThumbCell: View, Equatable {
     let photo: Photo
     let selected: Bool
     var marked = false
     @Local private var hover = false
+
+    static func == (a: ThumbCell, b: ThumbCell) -> Bool {
+        a.photo == b.photo && a.selected == b.selected && a.marked == b.marked
+    }
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
@@ -6260,7 +6359,7 @@ struct Filmstrip: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 6) {
                     ForEach(store.photos) { p in
-                        ThumbCell(photo: p, selected: p.id == store.selectedID, marked: store.multiSelection.contains(p.id))
+                        ThumbCell(photo: p, selected: p.id == store.selectedID, marked: store.multiSelection.contains(p.id)).equatable()
                             .frame(width: 92, height: 66)
                             .id(p.id)
                             .onTapGesture { store.click(p.id) }
@@ -6288,7 +6387,7 @@ struct LibraryGrid: View {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), spacing: 14)], spacing: 14) {
                     ForEach(store.photos) { p in
                         VStack(alignment: .leading, spacing: 6) {
-                            ThumbCell(photo: p, selected: p.id == store.selectedID, marked: store.multiSelection.contains(p.id))
+                            ThumbCell(photo: p, selected: p.id == store.selectedID, marked: store.multiSelection.contains(p.id)).equatable()
                                 .frame(height: 150)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(p.name).font(.system(size: 11, weight: .medium)).foregroundColor(Theme.text).lineLimit(1)
@@ -6582,6 +6681,8 @@ struct RevelaApp: App {
         WindowGroup("Revela") {
             ContentView()
                 .environmentObject(store)
+                .environmentObject(store.previews)
+                .environment(\.storeRef, store)
                 .frame(minWidth: 1150, minHeight: 720)
         }
         .windowStyle(.hiddenTitleBar)
