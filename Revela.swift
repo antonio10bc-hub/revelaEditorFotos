@@ -2395,46 +2395,98 @@ struct BuiltinPreset: Identifiable {
     let apply: (inout EditSettings) -> Void
     var id: String { name }
 
+    /// Estilos sacados de las fotos de @antonio10bc: tierra ocre, bruma de valle, hora azul, neón nocturno,
+    /// atardecer pastel, luz mediterránea, verde alpino, contraluz dorado, río de niebla y cañón umbrío.
+    /// Índices HSL: 0 rojo, 1 naranja, 2 amarillo, 3 verde, 4 aguamarina, 5 azul, 6 púrpura, 7 magenta.
     static let all: [BuiltinPreset] = [
-        BuiltinPreset(name: "B/N alto contraste") { s in
-            s.profile = .mono; s.contrast = 40; s.clarity = 20; s.blacks = -15; s.whites = 15
-            s.bwMix = [10, 15, 10, -10, -20, -30, -10, 0]
+        BuiltinPreset(name: "Tierra ocre") { s in
+            // Desierto, Bujará, pueblos toscanos: ocres dorados, cielo natural algo más profundo, negros apenas levantados
+            s.temp = 8; s.tint = 3; s.contrast = 10; s.highlights = -25; s.shadows = 10; s.blacks = -5
+            s.clarity = 8; s.vibrance = 5; s.saturation = -6
+            s.curveRGB = [CurvePoint(x: 0, y: 0.03), CurvePoint(x: 0.25, y: 0.23), CurvePoint(x: 0.75, y: 0.78), CurvePoint(x: 1, y: 0.98)]
+            s.hslSat[1] = 8; s.hslLum[1] = 5; s.hslHue[2] = -5; s.hslSat[2] = -10
+            s.hslSat[4] = -15; s.hslSat[5] = -10; s.hslLum[5] = -8
+            s.gradeShadows = GradeWheel(hue: 30, sat: 8, lum: 0); s.gradeHighlights = GradeWheel(hue: 45, sat: 10, lum: 0)
+            s.grainAmount = 10
         },
-        BuiltinPreset(name: "B/N suave") { s in
-            s.profile = .mono; s.contrast = -10; s.highlights = -30; s.shadows = 20; s.grainAmount = 20
+        BuiltinPreset(name: "Bruma de valle") { s in
+            // Montañas y llanuras con neblina: contraste plano, grises azulados, cielo pastel con un punto cálido
+            s.temp = -6; s.contrast = -15; s.highlights = -20; s.shadows = 15; s.whites = -10
+            s.dehaze = -10; s.clarity = -5; s.vibrance = -5; s.saturation = -15
+            s.curveRGB = [CurvePoint(x: 0, y: 0.08), CurvePoint(x: 0.3, y: 0.3), CurvePoint(x: 0.7, y: 0.7), CurvePoint(x: 1, y: 0.95)]
+            s.hslSat[2] = -15; s.hslSat[3] = -25; s.hslLum[3] = -5; s.hslSat[5] = -15
+            s.gradeShadows = GradeWheel(hue: 210, sat: 12, lum: 0); s.gradeHighlights = GradeWheel(hue: 40, sat: 6, lum: 0)
+            s.grainAmount = 8
         },
-        BuiltinPreset(name: "Película cálida") { s in
-            s.temp = 12; s.vibrance = 10; s.contrast = 10
-            s.curveRGB = [CurvePoint(x: 0, y: 0.06), CurvePoint(x: 0.5, y: 0.52), CurvePoint(x: 1, y: 0.96)]
-            s.gradeShadows = GradeWheel(hue: 200, sat: 12, lum: 0); s.gradeHighlights = GradeWheel(hue: 45, sat: 18, lum: 0)
-            s.grainAmount = 25
+        BuiltinPreset(name: "Hora azul") { s in
+            // Pueblo al anochecer: cielo pizarra, sombras frías y las luces cálidas encendidas
+            s.exposure = -0.3; s.temp = -8; s.contrast = 12; s.highlights = -15; s.shadows = -10; s.blacks = -10
+            s.vibrance = 5; s.saturation = -10
+            s.hslSat[1] = 15; s.hslLum[1] = 10; s.hslSat[2] = 10; s.hslSat[4] = -20; s.hslSat[5] = -20; s.hslLum[5] = -10
+            s.gradeShadows = GradeWheel(hue: 220, sat: 15, lum: -5); s.gradeHighlights = GradeWheel(hue: 40, sat: 15, lum: 0)
+            s.vigAmount = -15
         },
-        BuiltinPreset(name: "Teal & Orange") { s in
-            s.contrast = 15; s.vibrance = 10
-            s.gradeShadows = GradeWheel(hue: 195, sat: 30, lum: 0); s.gradeHighlights = GradeWheel(hue: 35, sat: 25, lum: 0)
-            s.hslHue[1] = -5; s.hslSat[4] = 20; s.hslSat[3] = -20
+        BuiltinPreset(name: "Neón nocturno") { s in
+            // Ciudad de noche desde lo alto: negros profundos, neones saturados, sombras azules
+            s.exposure = -0.2; s.contrast = 20; s.highlights = -10; s.shadows = -15; s.whites = 5; s.blacks = -25
+            s.clarity = 10; s.vibrance = 10; s.saturation = -5
+            s.curveRGB = [CurvePoint(x: 0, y: 0), CurvePoint(x: 0.2, y: 0.12), CurvePoint(x: 0.6, y: 0.62), CurvePoint(x: 1, y: 1)]
+            s.hslSat[0] = 10; s.hslSat[1] = -10; s.hslHue[5] = -5; s.hslSat[5] = -10; s.hslLum[5] = -10; s.hslSat[6] = 15; s.hslSat[7] = 20
+            s.gradeShadows = GradeWheel(hue: 225, sat: 18, lum: 0); s.gradeHighlights = GradeWheel(hue: 320, sat: 6, lum: 0)
+            s.nrLuminance = 15
         },
-        BuiltinPreset(name: "Mate") { s in
-            s.curveRGB = [CurvePoint(x: 0, y: 0.1), CurvePoint(x: 0.25, y: 0.24), CurvePoint(x: 0.75, y: 0.78), CurvePoint(x: 1, y: 0.95)]
-            s.saturation = -10; s.contrast = -5
+        BuiltinPreset(name: "Atardecer pastel") { s in
+            // Neblina rosada y melocotón sobre la ciudad: contraste suave, cielo pastel
+            s.temp = 8; s.tint = 4; s.contrast = -12; s.highlights = -20; s.shadows = 10
+            s.dehaze = -8; s.vibrance = 5; s.saturation = -10
+            s.curveRGB = [CurvePoint(x: 0, y: 0.07), CurvePoint(x: 0.5, y: 0.52), CurvePoint(x: 1, y: 0.96)]
+            s.hslHue[1] = -6; s.hslSat[1] = -5; s.hslSat[3] = -20; s.hslSat[5] = -25; s.hslLum[5] = 8
+            s.gradeShadows = GradeWheel(hue: 240, sat: 6, lum: 0); s.gradeMidtones = GradeWheel(hue: 350, sat: 4, lum: 0)
+            s.gradeHighlights = GradeWheel(hue: 25, sat: 20, lum: 0)
         },
-        BuiltinPreset(name: "Vívido") { s in
-            s.profile = .vivid; s.vibrance = 25; s.clarity = 10; s.dehaze = 10
+        BuiltinPreset(name: "Luz mediterránea") { s in
+            // Costa y sierra a pleno sol: claro, nítido, cielos azules limpios y fachadas cálidas
+            s.exposure = 0.15; s.contrast = 15; s.highlights = -30; s.shadows = 20; s.whites = 10; s.blacks = -8
+            s.clarity = 12; s.dehaze = 8; s.vibrance = 18; s.saturation = 2
+            s.hslSat[1] = 8; s.hslLum[1] = 6; s.hslSat[3] = -10; s.hslSat[4] = 5
+            s.hslHue[5] = -4; s.hslSat[5] = 10; s.hslLum[5] = -12
+            s.gradeHighlights = GradeWheel(hue: 45, sat: 6, lum: 0)
         },
-        BuiltinPreset(name: "Paisaje dramático") { s in
-            s.profile = .landscape; s.dehaze = 20; s.clarity = 25; s.highlights = -60; s.shadows = 40; s.vibrance = 20
-            s.hslLum[5] = -25; s.vigAmount = -15
+        BuiltinPreset(name: "Verde alpino") { s in
+            // Bosques y prados de montaña: verdes naturales sin estridencia, luz limpia y algo cálida
+            s.temp = 4; s.contrast = 10; s.highlights = -25; s.shadows = 15; s.texture = 10; s.clarity = 10
+            s.vibrance = 12; s.saturation = -3
+            s.hslHue[2] = -5; s.hslSat[2] = -5; s.hslHue[3] = -6; s.hslSat[3] = -8; s.hslLum[3] = 5
+            s.hslSat[4] = -10; s.hslLum[5] = -8
+            s.gradeShadows = GradeWheel(hue: 160, sat: 6, lum: 0); s.gradeHighlights = GradeWheel(hue: 50, sat: 6, lum: 0)
         },
-        BuiltinPreset(name: "Retrato luminoso") { s in
-            s.profile = .portrait; s.exposure = 0.2; s.highlights = -20; s.shadows = 15; s.texture = -15; s.clarity = -10
-            s.hslLum[1] = 10; s.hslSat[1] = -5
+        BuiltinPreset(name: "Contraluz dorado") { s in
+            // Sol bajo de frente: dorados en las luces, siluetas profundas
+            s.temp = 18; s.tint = 4; s.contrast = 18; s.highlights = -15; s.shadows = -20; s.blacks = -15
+            s.vibrance = 10; s.saturation = -5
+            s.hslSat[1] = 10; s.hslHue[2] = -8; s.hslSat[2] = 5; s.hslSat[5] = -30
+            s.gradeShadows = GradeWheel(hue: 25, sat: 10, lum: -5); s.gradeHighlights = GradeWheel(hue: 40, sat: 25, lum: 0)
+            s.vigAmount = -12
         },
-        BuiltinPreset(name: "Frío nórdico") { s in
-            s.temp = -15; s.saturation = -15; s.contrast = 10; s.hslSat[3] = -30
-            s.gradeShadows = GradeWheel(hue: 210, sat: 15, lum: 0)
+        BuiltinPreset(name: "Río de niebla") { s in
+            // Ciudad y río en día cubierto: apagado, plano, agua terrosa y cielo gris
+            s.contrast = -5; s.highlights = -35; s.shadows = 15; s.whites = -5; s.dehaze = 6; s.clarity = 5
+            s.vibrance = -5; s.saturation = -22
+            s.curveRGB = [CurvePoint(x: 0, y: 0.05), CurvePoint(x: 0.5, y: 0.5), CurvePoint(x: 1, y: 0.97)]
+            s.hslSat[1] = 5; s.hslSat[3] = -20; s.hslSat[5] = -20
+            s.gradeShadows = GradeWheel(hue: 200, sat: 8, lum: 0); s.gradeHighlights = GradeWheel(hue: 35, sat: 8, lum: 0)
+        },
+        BuiltinPreset(name: "Cañón umbrío") { s in
+            // Paredes de roca y vegetación en sombra: oscuro, texturado, verdes fríos y apagados
+            s.exposure = -0.2; s.contrast = 18; s.highlights = -30; s.shadows = -10; s.blacks = -15
+            s.texture = 15; s.clarity = 15; s.vibrance = 5; s.saturation = -10
+            s.hslSat[2] = -20; s.hslLum[2] = -5; s.hslHue[3] = 8; s.hslSat[3] = -20; s.hslLum[3] = -10; s.hslSat[4] = -10
+            s.gradeShadows = GradeWheel(hue: 170, sat: 10, lum: -4); s.gradeHighlights = GradeWheel(hue: 50, sat: 5, lum: 0)
+            s.vigAmount = -18
         },
     ]
 }
+
 
 struct WBPreset { let name: String; let kelvin: Double; let tint: Double }
 

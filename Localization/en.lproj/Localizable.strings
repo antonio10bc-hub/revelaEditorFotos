@@ -54,6 +54,7 @@
 "Aspereza" = "Roughness";
 "Atajos de teclado" = "Keyboard shortcuts";
 "Atajos de teclado (?)" = "Keyboard shortcuts (?)";
+"Atardecer pastel" = "Pastel dusk";
 "Auto" = "Auto";
 "Automático" = "Auto";
 "Aviso de recorte" = "Clipping warning";
@@ -80,6 +81,7 @@
 "Borrar máscara o corrección" = "Delete mask or spot";
 "Borrar todas" = "Clear all";
 "Borrar trazos" = "Clear strokes";
+"Bruma de valle" = "Valley haze";
 "Buscando el horizonte…" = "Looking for the horizon…";
 "Básico" = "Basic";
 "Calibración" = "Calibration";
@@ -91,6 +93,7 @@
 "Carpeta" = "Folder";
 "Carpeta elegida" = "Chosen folder";
 "Casi blanco" = "Near white";
+"Cañón umbrío" = "Shadowed canyon";
 "Cerrar" = "Close";
 "Cerrar herramienta" = "Close tool";
 "Claridad" = "Clarity";
@@ -105,6 +108,7 @@
 "Color de máscara" = "Mask color";
 "Como se tomó" = "As Shot";
 "Contraer todos" = "Collapse all";
+"Contraluz dorado" = "Golden backlight";
 "Contraste" = "Contrast";
 "Copiar / pegar ajustes" = "Copy / paste settings";
 "Copiar ajustes" = "Copy settings";
@@ -234,6 +238,7 @@
 "Herramientas" = "Tools";
 "Histograma" = "Histogram";
 "Historial" = "History";
+"Hora azul" = "Blue hour";
 "Horizontal" = "Horizontal";
 "INV" = "INV";
 "Idioma de la interfaz" = "Interface language";
@@ -276,6 +281,7 @@
 "Lupa · rueda para ampliar" = "Loupe · scroll to magnify";
 "Luz" = "Light";
 "Luz de día" = "Daylight";
+"Luz mediterránea" = "Mediterranean light";
 "Magenta" = "Magenta";
 "Manchas" = "Spots";
 "Manual" = "Manual";
@@ -316,6 +322,7 @@
 "Negro" = "Black";
 "Negros" = "Blacks";
 "Neutro" = "Neutral";
+"Neón nocturno" = "Night neon";
 "Ninguno (eliminar)" = "None (remove)";
 "Nitidez" = "Sharpness";
 "Nivela el horizonte o las líneas rectas de la foto" = "Levels the horizon or straight lines in the photo";
@@ -418,6 +425,7 @@
 "Revelar  (D)" = "Develop  (D)";
 "Rojo" = "Red";
 "Ruido" = "Noise";
+"Río de niebla" = "Misty river";
 "Saturación" = "Saturation";
 "Se eliminan las coordenadas GPS y el lugar; se conserva el resto." = "GPS coordinates and place are removed; everything else is kept.";
 "Se ha movido, renombrado o el disco no está conectado. Tus ajustes se conservan." = "It was moved, renamed, or the drive isn't connected. Your settings are kept.";
@@ -449,6 +457,7 @@
 "Teal & Orange" = "Teal & Orange";
 "Temp." = "Temp";
 "Textura" = "Texture";
+"Tierra ocre" = "Ochre earth";
 "Todas (%@)" = "All (%@)";
 "Todo" = "All";
 "Todos" = "All";
@@ -464,6 +473,7 @@
 "Variación" = "Variance";
 "Vectorscopio" = "Vectorscope";
 "Verde" = "Green";
+"Verde alpino" = "Alpine green";
 "Vertical" = "Vertical";
 "Vista" = "View";
 "Visualizar rango" = "Visualize range";

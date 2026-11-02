@@ -157,6 +157,10 @@ EN = {
     "Restablecer un deslizador": "Reset a slider", "Z / espacio": "Z / space", "⌥ + arrastrar": "⌥ + drag",
     "⇧⌘I  ·  o arrástralas a la ventana": "⇧⌘I  ·  or drag them into the window", "⌘ / ⇧ + clic": "⌘ / ⇧ + click",
     "Hecho": "Done", "Manchas": "Spots", "Orientación": "Orientation",
+    # Ajustes preestablecidos (estilos de @antonio10bc)
+    "Tierra ocre": "Ochre earth", "Bruma de valle": "Valley haze", "Hora azul": "Blue hour", "Neón nocturno": "Night neon",
+    "Atardecer pastel": "Pastel dusk", "Luz mediterránea": "Mediterranean light", "Verde alpino": "Alpine green",
+    "Contraluz dorado": "Golden backlight", "Río de niebla": "Misty river", "Cañón umbrío": "Shadowed canyon",
     "Clic sobre una mancha: corrección circular. Arrastra para pintar sobre manchas alargadas (cables, pelos, grietas). El origen se elige solo; arrastra el contorno discontinuo para cambiarlo. La rueda cambia el tamaño. ⌫ borra la seleccionada.":
         "Click a spot: circular fix. Drag to paint over long blemishes (cables, hairs, cracks). The source is picked automatically; drag the dashed outline to change it. Scroll to change the size. ⌫ deletes the selected one.",
     "Clonar (pincel)": "Clone (brush)", "Corregir (pincel)": "Heal (brush)", "Quitar": "Clear",
