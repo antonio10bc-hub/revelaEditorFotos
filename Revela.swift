@@ -322,8 +322,10 @@ struct HealSpot: Codable, Equatable, Identifiable {
 
 struct Photo: Identifiable, Equatable {
     let id = UUID()
-    let url: URL
+    var url: URL
     let isRAW: Bool
+    /// El archivo ya no está donde se importó (se ha movido, renombrado o el disco no está conectado).
+    var missing = false
     var settings: EditSettings
     var thumbnail: CGImage?
     var exif = ""
@@ -383,6 +385,55 @@ enum ExportFormat: String, CaseIterable, Identifiable {
         switch self { case .jpeg: return "jpg"; case .heic: return "heic"; case .tiff: return "tif"; case .png: return "png" }
     }
     var lossy: Bool { self == .jpeg || self == .heic }
+    var uti: CFString {
+        switch self {
+        case .jpeg: return UTType.jpeg.identifier as CFString
+        case .heic: return UTType.heic.identifier as CFString
+        case .tiff: return UTType.tiff.identifier as CFString
+        case .png: return UTType.png.identifier as CFString
+        }
+    }
+}
+
+enum ExportSizing: String, CaseIterable, Identifiable {
+    case original = "Tamaño original", longEdge = "Lado largo", shortEdge = "Lado corto", width = "Ancho", height = "Alto"
+    case megapixels = "Megapíxeles", percent = "Porcentaje"
+    var id: String { rawValue }
+    var unit: String { self == .megapixels ? "MP" : (self == .percent ? "%" : "px") }
+
+    /// Escala a aplicar a una imagen de `w`×`h` píxeles.
+    func scale(_ w: Double, _ h: Double, value v: Double) -> Double {
+        guard v > 0, w > 0, h > 0 else { return 1 }
+        switch self {
+        case .original: return 1
+        case .longEdge: return v / max(w, h)
+        case .shortEdge: return v / min(w, h)
+        case .width: return v / w
+        case .height: return v / h
+        case .megapixels: return (v * 1_000_000 / (w * h)).squareRoot()
+        case .percent: return v / 100
+        }
+    }
+}
+
+enum ExportMetadata: String, CaseIterable, Identifiable {
+    case all = "Todos", noLocation = "Todos menos la ubicación", none = "Ninguno (eliminar)"
+    var id: String { rawValue }
+}
+
+enum ExportNaming: String, CaseIterable, Identifiable {
+    case original = "Nombre original", suffix = "Original + sufijo", custom = "Nombre + número"
+    var id: String { rawValue }
+}
+
+struct ExportOptions {
+    var format = ExportFormat.jpeg
+    var quality = 0.9
+    var sizing = ExportSizing.original
+    var sizeValue = 2048.0
+    var noEnlarge = true
+    var ppi = 300
+    var metadata = ExportMetadata.all
 }
 
 let rawExtensions: Set<String> = ["cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "raf", "orf", "rw2", "rwl",
@@ -1595,22 +1646,55 @@ final class Engine: @unchecked Sendable {
         return Result(image: cg, histogramSource: histCG, fullSize: full, asShot: asShot(for: req.url))
     }
 
-    func export(_ req: Request, to url: URL, format: ExportFormat, quality: Double, longEdge: Int?) throws {
+    func export(_ req: Request, to url: URL, options o: ExportOptions) throws {
         guard var (img, _) = pipeline(req) else { throw CocoaError(.fileReadCorruptFile) }
-        if let le = longEdge {
-            let s = CGFloat(le) / max(img.extent.width, img.extent.height)
-            if s < 1 {
-                img = img.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: s, kCIInputAspectRatioKey: 1]).normalized()
-                img = img.cropped(to: img.extent.integral)
+        var s = o.sizing.scale(Double(img.extent.width), Double(img.extent.height), value: o.sizeValue)
+        if o.noEnlarge { s = min(s, 1) }
+        if abs(s - 1) > 1e-4 {
+            img = img.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: s, kCIInputAspectRatioKey: 1]).normalized()
+            img = img.cropped(to: img.extent.integral)
+        }
+        let deep = o.format == .tiff
+        guard let cg = ctx.createCGImage(img, from: img.extent, format: deep ? .RGBA16 : .RGBA8, colorSpace: sRGBSpace),
+              let dest = CGImageDestinationCreateWithURL(url as CFURL, o.format.uti, 1, nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        CGImageDestinationAddImage(dest, cg, Self.exportProperties(source: req.url, options: o) as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { throw CocoaError(.fileWriteUnknown) }
+    }
+
+    /// Metadatos de la copia exportada: los del original según la opción elegida, sin orientación
+    /// (los píxeles ya están girados) ni dimensiones antiguas.
+    static func exportProperties(source: URL, options o: ExportOptions) -> [CFString: Any] {
+        var props: [CFString: Any] = [
+            kCGImagePropertyOrientation: 1,
+            kCGImagePropertyDPIWidth: o.ppi,
+            kCGImagePropertyDPIHeight: o.ppi,
+        ]
+        if o.format.lossy { props[kCGImageDestinationLossyCompressionQuality] = o.quality }
+        guard o.metadata != .none, let src = CGImageSourceCreateWithURL(source as CFURL, nil),
+              let orig = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return props }
+        var keys = [kCGImagePropertyExifDictionary, kCGImagePropertyTIFFDictionary, kCGImagePropertyIPTCDictionary,
+                    kCGImagePropertyExifAuxDictionary]
+        if o.metadata == .all { keys.append(kCGImagePropertyGPSDictionary) }
+        for k in keys {
+            guard var d = orig[k] as? [CFString: Any] else { continue }
+            d[kCGImagePropertyTIFFOrientation] = nil
+            d[kCGImagePropertyExifPixelXDimension] = nil
+            d[kCGImagePropertyExifPixelYDimension] = nil
+            if k == kCGImagePropertyIPTCDictionary && o.metadata == .noLocation {
+                for loc in [kCGImagePropertyIPTCCity, kCGImagePropertyIPTCSubLocation, kCGImagePropertyIPTCProvinceState,
+                            kCGImagePropertyIPTCCountryPrimaryLocationName, kCGImagePropertyIPTCCountryPrimaryLocationCode] {
+                    d[loc] = nil
+                }
             }
+            props[k] = d
         }
-        let q = [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): quality]
-        switch format {
-        case .jpeg: try ctx.writeJPEGRepresentation(of: img, to: url, colorSpace: sRGBSpace, options: q)
-        case .heic: try ctx.writeHEIFRepresentation(of: img, to: url, format: .RGBA8, colorSpace: sRGBSpace, options: q)
-        case .tiff: try ctx.writeTIFFRepresentation(of: img, to: url, format: .RGBA16, colorSpace: sRGBSpace, options: [:])
-        case .png: try ctx.writePNGRepresentation(of: img, to: url, format: .RGBA8, colorSpace: sRGBSpace, options: [:])
+        if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+            tiff[kCGImagePropertyTIFFSoftware] = "Revela"
+            props[kCGImagePropertyTIFFDictionary] = tiff
         }
+        return props
     }
 }
 
@@ -1913,6 +1997,16 @@ let wbPresets = [
     WBPreset(name: "Fluorescente", kelvin: 3800, tint: 21), WBPreset(name: "Flash", kelvin: 5500, tint: 0),
 ]
 
+/// Indicador compartido entre hilos para cancelar un trabajo en segundo plano.
+final class CancelFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    var value: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return flag }
+        set { lock.lock(); flag = newValue; lock.unlock() }
+    }
+}
+
 // MARK: - Store
 
 @MainActor
@@ -2171,6 +2265,11 @@ final class Store: ObservableObject {
 
     func scheduleRender() {
         guard let photo = current, module == .develop else { return }
+        if !FileManager.default.fileExists(atPath: photo.url.path) {
+            if let i = currentIndex, !photos[i].missing { photos[i].missing = true }
+            preview = nil
+            return
+        }
         if inFlight { pending = true; return }
         inFlight = true
         armBusy()
@@ -3065,35 +3164,90 @@ final class Store: ObservableObject {
 
     // MARK: Exportación
 
-    func export(all: Bool, format: ExportFormat, quality: Double, longEdge: Int?) {
+    enum ExportScope: Int { case selected, marked, all }
+
+    struct ExportDestination {
+        var sameFolder = false      // junto a cada original
+        var folder: URL?            // carpeta elegida
+        var subfolder = ""          // opcional, dentro del destino
+        var naming = ExportNaming.original
+        var text = ""               // sufijo o nombre base
+    }
+
+    /// Progreso de la exportación en curso (0…1) y texto; nil si no se exporta nada.
+    @Published var exportProgress: Double?
+    @Published var exportLabel = ""
+    private let exportCancel = CancelFlag()
+
+    func exportItems(_ scope: ExportScope) -> [Photo] {
+        switch scope {
+        case .selected: return photos.filter { $0.id == selectedID }
+        case .marked: return photos.filter { $0.id == selectedID || multiSelection.contains($0.id) }
+        case .all: return photos
+        }
+    }
+
+    func export(_ scope: ExportScope, options: ExportOptions, destination d: ExportDestination) {
         if let i = currentIndex { photos[i].settings = settings }
-        let items = all ? photos : photos.filter { $0.id == selectedID }
-        guard !items.isEmpty else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "Exportar aquí"
-        guard panel.runModal() == .OK, let dir = panel.url else { return }
-        status = "Exportando 0/\(items.count)…"
+        let all = exportItems(scope)
+        let items = all.filter { !$0.missing }
+        guard !items.isEmpty else { flash("No hay fotos que exportar"); return }
+        var base = d.folder
+        if !d.sameFolder && base == nil {
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.canCreateDirectories = true
+            panel.prompt = "Exportar aquí"
+            guard panel.runModal() == .OK, let dir = panel.url else { return }
+            base = dir
+        }
+        let skipped = all.count - items.count
+        exportCancel.value = false
+        exportProgress = 0
+        exportLabel = "Exportando 0 de \(items.count)"
         let jobs = items.map { Engine.Request(url: $0.url, isRAW: $0.isRAW, settings: $0.settings, maxPixel: nil, fresh: true) }
+        let cancel = exportCancel
         exportQueue.async { [exportEngine] in
             var done: [URL] = []
             var errors = 0
             for (n, job) in jobs.enumerated() {
-                let out = Self.uniqueURL(in: dir, base: job.url.deletingPathExtension().lastPathComponent, ext: format.ext)
+                if cancel.value { break }
+                var dir = d.sameFolder ? job.url.deletingLastPathComponent() : base!
+                let sub = d.subfolder.trimmingCharacters(in: .whitespaces)
+                if !sub.isEmpty { dir.appendPathComponent(sub, isDirectory: true) }
+                let original = job.url.deletingPathExtension().lastPathComponent
+                let name: String
+                switch d.naming {
+                case .original: name = original
+                case .suffix: name = original + d.text
+                case .custom:
+                    let digits = max(3, String(jobs.count).count)
+                    name = (d.text.isEmpty ? "Foto" : d.text) + "-" + String(format: "%0\(digits)d", n + 1)
+                }
                 do {
-                    try exportEngine.export(job, to: out, format: format, quality: quality, longEdge: longEdge)
+                    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    let out = Self.uniqueURL(in: dir, base: name, ext: options.format.ext)
+                    try exportEngine.export(job, to: out, options: options)
                     done.append(out)
                 } catch { errors += 1 }
-                DispatchQueue.main.async { self.status = "Exportando \(n + 1)/\(jobs.count)…" }
+                DispatchQueue.main.async {
+                    self.exportProgress = Double(n + 1) / Double(jobs.count)
+                    self.exportLabel = "Exportando \(n + 1) de \(jobs.count)"
+                }
             }
             DispatchQueue.main.async {
-                self.flash(errors == 0 ? "Exportadas \(done.count) fotos" : "Exportadas \(done.count) · \(errors) con errores")
+                self.exportProgress = nil
+                var msg = cancel.value ? "Exportación cancelada: \(done.count) fotos" : "Exportadas \(done.count) fotos"
+                if errors > 0 { msg += " · \(errors) con errores" }
+                if skipped > 0 { msg += " · \(skipped) no encontradas" }
+                self.flash(msg)
                 if !done.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(done) }
             }
         }
     }
+
+    func cancelExport() { exportCancel.value = true }
 
     nonisolated static func uniqueURL(in dir: URL, base: String, ext: String) -> URL {
         var url = dir.appendingPathComponent("\(base).\(ext)")
@@ -3158,15 +3312,43 @@ final class Store: ObservableObject {
         guard let raw = try? Data(contentsOf: catalogURL), let data = Self.migrateCatalog(raw),
               let cat = try? JSONDecoder().decode(Catalog.self, from: data) else { return }
         userPresets = cat.presets
-        var saved: [URL: EditSettings] = [:]
-        var urls: [URL] = []
-        for e in cat.photos where FileManager.default.fileExists(atPath: e.path) {
+        // Se conservan también las fotos que faltan, marcadas, para poder localizarlas
+        photos = cat.photos.map { e in
             let u = URL(fileURLWithPath: e.path)
-            saved[u] = e.settings
-            urls.append(u)
+            return Photo(url: u, isRAW: isRAWFile(u), missing: !FileManager.default.fileExists(atPath: e.path), settings: e.settings)
         }
-        add(urls: urls, settings: saved)
+        for p in photos where !p.missing { loadThumbnail(p) }
+        if let first = photos.first(where: { !$0.missing }) ?? photos.first { select(first.id) }
     }
+
+    /// Pide la nueva ubicación de una foto que falta y, de paso, reencuentra en esa carpeta otras que falten.
+    func locate(_ id: UUID) {
+        guard let i = photos.firstIndex(where: { $0.id == id }) else { return }
+        let p = NSOpenPanel()
+        p.allowedContentTypes = [.image, .rawImage]
+        p.message = "¿Dónde está ahora \(photos[i].name)?"
+        p.prompt = "Localizar"
+        guard p.runModal() == .OK, let url = p.url else { return }
+        relink(i, to: url)
+        let dir = url.deletingLastPathComponent()
+        var found = 0
+        for j in photos.indices where photos[j].missing {
+            let cand = dir.appendingPathComponent(photos[j].name)
+            if FileManager.default.fileExists(atPath: cand.path) { relink(j, to: cand); found += 1 }
+        }
+        flash(found > 0 ? "Foto localizada y \(found) más en la misma carpeta" : "Foto localizada")
+        saveCatalogSoon()
+        if id == selectedID { scheduleRender() }
+    }
+
+    private func relink(_ i: Int, to url: URL) {
+        photos[i].url = url
+        photos[i].missing = false
+        photos[i].thumbnail = nil
+        loadThumbnail(photos[i])
+    }
+
+    var missingCount: Int { photos.filter(\.missing).count }
 
     func saveCatalogSoon() {
         saveWork?.cancel()
@@ -5125,52 +5307,176 @@ struct CropOverlay: View {
 struct ExportSheet: View {
     @EnvironmentObject var store: Store
     @Environment(\.dismiss) private var dismiss
+    // Todo se recuerda entre exportaciones
     @AppStorage("export.format") private var format = ExportFormat.jpeg.rawValue
     @AppStorage("export.quality") private var quality = 90.0
-    @AppStorage("export.resize") private var resize = false
-    @AppStorage("export.longEdge") private var longEdge = 2048
-    @AppStorage("export.all") private var all = false
+    @AppStorage("export.sizing") private var sizing = ExportSizing.original.rawValue
+    @AppStorage("export.sizeValue") private var sizeValue = 2048.0
+    @AppStorage("export.noEnlarge") private var noEnlarge = true
+    @AppStorage("export.ppi") private var ppi = 300
+    @AppStorage("export.metadata") private var metadata = ExportMetadata.all.rawValue
+    @AppStorage("export.scope") private var scope = Store.ExportScope.selected.rawValue
+    @AppStorage("export.sameFolder") private var sameFolder = false
+    @AppStorage("export.folder") private var folderPath = ""
+    @AppStorage("export.subfolder") private var subfolder = ""
+    @AppStorage("export.naming") private var naming = ExportNaming.original.rawValue
+    @AppStorage("export.namingText") private var namingText = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Exportar").font(.system(size: 16, weight: .semibold)).foregroundColor(.white)
-            Form {
-                Picker("Formato", selection: $format) {
-                    ForEach(ExportFormat.allCases) { Text($0.rawValue).tag($0.rawValue) }
+        let fmt = ExportFormat(rawValue: format) ?? .jpeg
+        let sz = ExportSizing(rawValue: sizing) ?? .original
+        let nm = ExportNaming(rawValue: naming) ?? .original
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Exportar").font(.system(size: 16, weight: .semibold)).foregroundColor(.white)
+                Spacer()
+                Menu("Ajustes rápidos") {
+                    Button("Web · JPEG 2048 px, sin ubicación") { apply(.jpeg, 85, .longEdge, 2048, 72, .noLocation) }
+                    Button("Redes sociales · JPEG 1080 px de ancho, sin metadatos") { apply(.jpeg, 90, .width, 1080, 72, .none) }
+                    Button("Impresión · TIFF 16 bits, tamaño original") { apply(.tiff, 100, .original, 0, 300, .all) }
+                    Button("Archivo · HEIC calidad 95") { apply(.heic, 95, .original, 0, 300, .all) }
                 }
-                if (ExportFormat(rawValue: format) ?? .jpeg).lossy {
-                    HStack {
-                        Slider(value: $quality, in: 10...100, step: 1) { Text("Calidad") }
-                        Text("\(Int(quality))").monospacedDigit().frame(width: 30)
+                .fixedSize()
+            }
+            Form {
+                Section("Fotos") {
+                    Picker("Exportar", selection: $scope) {
+                        Text("Foto seleccionada").tag(Store.ExportScope.selected.rawValue)
+                        Text("Marcadas (\(store.exportItems(.marked).count))").tag(Store.ExportScope.marked.rawValue)
+                        Text("Todas (\(store.photos.count))").tag(Store.ExportScope.all.rawValue)
                     }
                 }
-                Toggle("Redimensionar (lado largo)", isOn: $resize)
-                if resize {
-                    TextField("Píxeles", value: $longEdge, format: .number).frame(width: 100)
+                Section("Destino") {
+                    Picker("Carpeta", selection: $sameFolder) {
+                        Text("Carpeta elegida").tag(false)
+                        Text("Junto a cada original").tag(true)
+                    }
+                    if !sameFolder {
+                        HStack {
+                            Text(folderPath.isEmpty ? "Se preguntará al exportar" : folderPath)
+                                .font(.system(size: 11)).foregroundColor(folderPath.isEmpty ? Theme.dim : Theme.text)
+                                .lineLimit(1).truncationMode(.middle)
+                            Spacer()
+                            Button("Elegir…") { chooseFolder() }
+                        }
+                    }
+                    TextField("Subcarpeta (opcional)", text: $subfolder)
                 }
-                Picker("Fotos", selection: $all) {
-                    Text("Foto seleccionada").tag(false)
-                    Text("Todas (\(store.photos.count))").tag(true)
+                Section("Nombre de archivo") {
+                    Picker("Nombre", selection: $naming) {
+                        ForEach(ExportNaming.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                    }
+                    if nm != .original {
+                        TextField(nm == .suffix ? "Sufijo (p. ej. -editada)" : "Nombre base (p. ej. Viaje)", text: $namingText)
+                    }
+                    Text("Ejemplo: " + example(nm, fmt)).font(.system(size: 10.5)).foregroundColor(Theme.dim)
                 }
-                .pickerStyle(.radioGroup)
+                Section("Formato") {
+                    Picker("Formato", selection: $format) {
+                        ForEach(ExportFormat.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                    }
+                    if fmt.lossy {
+                        HStack {
+                            Slider(value: $quality, in: 10...100, step: 1) { Text("Calidad") }
+                            Text("\(Int(quality))").monospacedDigit().frame(width: 30)
+                        }
+                    }
+                }
+                Section("Tamaño de imagen") {
+                    Picker("Ajustar", selection: $sizing) {
+                        ForEach(ExportSizing.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                    }
+                    if sz != .original {
+                        HStack {
+                            TextField("Valor", value: $sizeValue, format: .number).frame(width: 90)
+                            Text(sz.unit).foregroundColor(Theme.secondary)
+                            Spacer()
+                            Toggle("No ampliar", isOn: $noEnlarge)
+                        }
+                    }
+                    Picker("Resolución", selection: $ppi) {
+                        ForEach([72, 150, 240, 300, 360], id: \.self) { Text("\($0) ppp").tag($0) }
+                    }
+                    if let p = store.current, p.pixelSize.width > 0 {
+                        let s = min(noEnlarge ? 1 : .infinity, sz.scale(p.pixelSize.width * store.settings.cropW,
+                                                                         p.pixelSize.height * store.settings.cropH, value: sizeValue))
+                        Text("Foto actual: \(Int((p.pixelSize.width * store.settings.cropW * s).rounded())) × \(Int((p.pixelSize.height * store.settings.cropH * s).rounded())) px")
+                            .font(.system(size: 10.5)).foregroundColor(Theme.dim)
+                    }
+                }
+                Section("Metadatos") {
+                    Picker("Incluir", selection: $metadata) {
+                        ForEach(ExportMetadata.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                    }
+                    Text(metadataHint).font(.system(size: 10.5)).foregroundColor(Theme.dim)
+                }
             }
+            .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
             HStack {
                 Spacer()
                 Button("Cancelar") { dismiss() }.buttonStyle(GhostButtonStyle()).keyboardShortcut(.cancelAction)
-                Button("Exportar…") {
-                    dismiss()
-                    let f = ExportFormat(rawValue: format) ?? .jpeg
-                    let q = quality / 100, le = resize ? max(64, longEdge) : nil, a = all
-                    DispatchQueue.main.async { store.export(all: a, format: f, quality: q, longEdge: le) }
-                }
-                .buttonStyle(GhostButtonStyle(prominent: true))
-                .keyboardShortcut(.defaultAction)
+                Button("Exportar") { start() }
+                    .buttonStyle(GhostButtonStyle(prominent: true))
+                    .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(24)
-        .frame(width: 420)
+        .padding(20)
+        .frame(width: 500, height: 640)
         .background(Theme.panel)
-        .tint(.white)
+        .tint(Theme.accent)
+    }
+
+    private var metadataHint: String {
+        switch ExportMetadata(rawValue: metadata) ?? .all {
+        case .all: return "Cámara, objetivo, ajustes de toma, fecha, ubicación GPS y copyright."
+        case .noLocation: return "Se eliminan las coordenadas GPS y el lugar; se conserva el resto."
+        case .none: return "La copia no lleva datos de cámara, fecha, ubicación ni autor."
+        }
+    }
+
+    private func example(_ nm: ExportNaming, _ fmt: ExportFormat) -> String {
+        let orig = store.current.map { $0.url.deletingPathExtension().lastPathComponent } ?? "IMG_0001"
+        switch nm {
+        case .original: return "\(orig).\(fmt.ext)"
+        case .suffix: return "\(orig)\(namingText).\(fmt.ext)"
+        case .custom: return "\(namingText.isEmpty ? "Foto" : namingText)-001.\(fmt.ext)"
+        }
+    }
+
+    private func apply(_ f: ExportFormat, _ q: Double, _ s: ExportSizing, _ v: Double, _ p: Int, _ m: ExportMetadata) {
+        format = f.rawValue; quality = q; sizing = s.rawValue; ppi = p; metadata = m.rawValue
+        if v > 0 { sizeValue = v }
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Elegir"
+        if !folderPath.isEmpty { panel.directoryURL = URL(fileURLWithPath: folderPath) }
+        if panel.runModal() == .OK, let url = panel.url { folderPath = url.path }
+    }
+
+    private func start() {
+        var o = ExportOptions()
+        o.format = ExportFormat(rawValue: format) ?? .jpeg
+        o.quality = quality / 100
+        o.sizing = ExportSizing(rawValue: sizing) ?? .original
+        o.sizeValue = max(1, sizeValue)
+        o.noEnlarge = noEnlarge
+        o.ppi = ppi
+        o.metadata = ExportMetadata(rawValue: metadata) ?? .all
+        var d = Store.ExportDestination()
+        d.sameFolder = sameFolder
+        d.folder = folderPath.isEmpty || !FileManager.default.fileExists(atPath: folderPath) ? nil : URL(fileURLWithPath: folderPath)
+        d.subfolder = subfolder
+        d.naming = ExportNaming(rawValue: naming) ?? .original
+        d.text = namingText
+        let sc = Store.ExportScope(rawValue: scope) ?? .selected
+        dismiss()
+        DispatchQueue.main.async { store.export(sc, options: o, destination: d) }
     }
 }
 
@@ -5494,7 +5800,7 @@ struct CanvasView: View {
         GeometryReader { geo in
             ZStack {
                 Theme.canvas
-                if let cg = store.preview ?? store.current?.thumbnail {
+                if store.current?.missing != true, let cg = store.preview ?? store.current?.thumbnail {
                     if store.zoomed && store.tool == .none {
                         ZoomedImage(image: cg)
                     } else if store.sideBySideActive {
@@ -5516,6 +5822,16 @@ struct CanvasView: View {
                             .background(Color.black.shadow(color: .black.opacity(0.55), radius: 18, y: 4))
                             .overlay(ImageOverlay())
                             .padding(store.tool == .crop ? 40 : 28)
+                    }
+                } else if let p = store.current, p.missing {
+                    VStack(spacing: 12) {
+                        Image(systemName: "questionmark.folder").font(.system(size: 38, weight: .light)).foregroundColor(Color.orange)
+                        Text("No se encuentra «\(p.name)»").font(.system(size: 15, weight: .semibold)).foregroundColor(.white)
+                        Text(p.url.deletingLastPathComponent().path).font(.system(size: 11)).foregroundColor(Theme.dim)
+                            .lineLimit(1).truncationMode(.middle).frame(maxWidth: 420)
+                        Text("Se ha movido, renombrado o el disco no está conectado. Tus ajustes se conservan.")
+                            .font(.system(size: 11.5)).foregroundColor(Theme.secondary)
+                        Button("Localizar…") { store.locate(p.id) }.buttonStyle(GhostButtonStyle(prominent: true))
                     }
                 } else if store.photos.isEmpty {
                     EmptyState()
@@ -5592,7 +5908,13 @@ struct ThumbCell: View {
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             Color(white: 0.1)
-            if let t = photo.thumbnail {
+            if photo.missing {
+                VStack(spacing: 3) {
+                    Image(systemName: "questionmark.folder").font(.system(size: 16)).foregroundColor(Color.orange)
+                    Text("No encontrada").font(.system(size: 8.5, weight: .semibold)).foregroundColor(Color.orange)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let t = photo.thumbnail {
                 Image(decorative: t, scale: 1).resizable().interpolation(.medium).aspectRatio(contentMode: .fit).padding(3)
             } else {
                 ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -5622,7 +5944,11 @@ struct PhotoContextMenu: View {
     @EnvironmentObject var store: Store
     let photo: Photo
     var body: some View {
-        Button("Mostrar en Finder") { NSWorkspace.shared.activateFileViewerSelecting([photo.url]) }
+        if photo.missing {
+            Button("Localizar…") { store.locate(photo.id) }
+        } else {
+            Button("Mostrar en Finder") { NSWorkspace.shared.activateFileViewerSelecting([photo.url]) }
+        }
         Button("Pegar ajustes copiados") {
             store.select(photo.id)
             store.pasteSettings()
@@ -5780,6 +6106,17 @@ struct BottomBar: View {
                 }
             }
             Spacer()
+            if let p = store.exportProgress {
+                HStack(spacing: 6) {
+                    Text(store.exportLabel).font(.system(size: 10.5).monospacedDigit()).foregroundColor(Theme.text)
+                    ProgressView(value: p).progressViewStyle(.linear).tint(Theme.accent).frame(width: 120)
+                    IconButton(icon: "xmark", help: "Cancelar la exportación", size: 9) { store.cancelExport() }
+                }
+            }
+            if store.missingCount > 0 {
+                Text("\(store.missingCount) no encontradas").font(.system(size: 10.5)).foregroundColor(.orange)
+                    .help("Clic derecho en la miniatura ▸ Localizar…")
+            }
             if !store.multiSelection.isEmpty {
                 Text("\(store.multiSelection.count + 1) marcadas").font(.system(size: 10.5)).foregroundColor(Theme.secondary)
                 Button("Igualar exposición") { store.matchExposure() }.buttonStyle(GhostButtonStyle(compact: true))
@@ -5845,9 +6182,42 @@ struct ShortcutsSheet: View {
     }
 }
 
+/// Separador vertical que se arrastra para cambiar el ancho de un panel.
+struct PanelResizer: View {
+    @Binding var width: Double
+    let range: ClosedRange<Double>
+    /// +1 si el panel está a la izquierda del separador, −1 si está a la derecha.
+    let direction: Double
+    @Local private var start: Double?
+    @Local private var hover = false
+
+    var body: some View {
+        Rectangle()
+            .fill(hover || start != nil ? Theme.accent.opacity(0.6) : Color.black.opacity(0.55))
+            .frame(width: hover || start != nil ? 2 : 1)
+            .padding(.horizontal, 3)
+            .contentShape(Rectangle())
+            .padding(.horizontal, -3)
+            .onHover { h in
+                hover = h
+                if h { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { v in
+                    if start == nil { start = width }
+                    width = min(max((start ?? width) + direction * Double(v.translation.width), range.lowerBound), range.upperBound)
+                }
+                .onEnded { _ in start = nil })
+            .onTapGesture(count: 2) { width = direction > 0 ? 236 : 330 }
+            .help("Arrastra para cambiar el ancho · doble clic para restablecer")
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var store: Store
     @AppStorage("showLeftPanel") private var showLeft = true
+    @AppStorage("leftPanelWidth") private var leftWidth = 236.0
+    @AppStorage("rightPanelWidth") private var rightWidth = 330.0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -5856,13 +6226,13 @@ struct ContentView: View {
             HStack(spacing: 0) {
                 if store.module == .develop {
                     if showLeft && !store.panelsHidden {
-                        LeftPanel().frame(width: 236).transition(.move(edge: .leading).combined(with: .opacity))
-                        Separator(vertical: true)
+                        LeftPanel().frame(width: leftWidth).transition(.move(edge: .leading).combined(with: .opacity))
+                        PanelResizer(width: $leftWidth, range: 190...420, direction: 1)
                     }
                     CanvasView()
                     if !store.panelsHidden {
-                        Separator(vertical: true)
-                        RightPanel().frame(width: 330).transition(.move(edge: .trailing).combined(with: .opacity))
+                        PanelResizer(width: $rightWidth, range: 290...560, direction: -1)
+                        RightPanel().frame(width: rightWidth).transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 } else {
                     LibraryGrid()
