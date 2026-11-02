@@ -24,10 +24,14 @@ enum Theme {
     static let text = Color(white: 0.88)
     static let secondary = Color(white: 0.68)
     static let dim = Color(white: 0.53)
-    static let accent = Color.white
+    /// Amarillo verdoso eléctrico (el del icono): solo para lo seleccionado o activo.
+    static let accent = Color(red: 0.80, green: 1.0, blue: 0.10)
+    static let accentFill = Color(red: 0.80, green: 1.0, blue: 0.10).opacity(0.13)
+    static let onAccent = Color(white: 0.05)
+    static let border = Color.white.opacity(0.09)
     static let track = Color(white: 0.26)
     static let fill = Color.white.opacity(0.06)
-    static let selection = Color.white.opacity(0.13)
+    static let selection = Color.white.opacity(0.10)
 }
 
 /// Pistas de color solo donde el color aporta información (temperatura, matiz, saturación, HSL…).
@@ -1949,7 +1953,12 @@ final class Store: ObservableObject {
     @Published var clipHigh = false { didSet { scheduleRender() } }
     @Published var clipLow = false { didSet { scheduleRender() } }
     @Published var busy = false
-    @Published var zoomAnchor = CGPoint(x: 0.5, y: 0.5)
+    /// Comparación lado a lado: con la versión "antes" o, si `compareReference`, con otra foto de referencia.
+    @Published var sideBySide = false { didSet { scheduleRender() } }
+    @Published var compareReference = false { didSet { scheduleRender() } }
+    @Published var referenceID: UUID? { didSet { referencePreview = nil; referenceKey = nil; scheduleRender() } }
+    @Published var referencePreview: CGImage?
+    private var referenceKey: BeforeKey?
     @Published var navigatorPreview: CGImage?
     @Published var navigatorLabel: String?
     @Published var showShortcuts = false
@@ -1983,6 +1992,7 @@ final class Store: ObservableObject {
     private var thumbDirty = false
     private var saveWork: DispatchWorkItem?
     private var keyMonitor: Any?
+    private var scrollMonitor: Any?
     private var busyWork: DispatchWorkItem?
     private var hoverToken = 0
     private struct BeforeKey: Equatable { var url: URL; var settings: EditSettings; var maxPixel: CGFloat? }
@@ -2002,6 +2012,10 @@ final class Store: ObservableObject {
             if e.window?.firstResponder is NSTextView { return e }
             if !e.modifierFlags.intersection([.command, .control, .option]).isEmpty { return e }
             return MainActor.assumeIsolated { self.handleKey(e) } ? nil : e
+        }
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .magnify]) { [weak self] e in
+            guard let self else { return e }
+            return MainActor.assumeIsolated { self.handleScroll(e) } ? nil : e
         }
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.saveCatalog() }
@@ -2170,7 +2184,19 @@ final class Store: ObservableObject {
         req.clipLow = clipLow
         req.overlayPoint = showBefore ? nil : activePointOverlay
         var beforeReq: Engine.Request?
-        if splitActive {
+        if sideBySideActive && compareReference, let rid = referenceID, let ref = photos.first(where: { $0.id == rid }) {
+            let rs = rid == photo.id ? settings : ref.settings
+            let key = BeforeKey(url: ref.url, settings: rs, maxPixel: maxPx)
+            if key != referenceKey || referencePreview == nil {
+                referenceKey = key
+                let rreq = Engine.Request(url: ref.url, isRAW: ref.isRAW, settings: rs, maxPixel: maxPx)
+                thumbQueue.async { [thumbEngine] in
+                    let img = thumbEngine.render(rreq)?.image
+                    DispatchQueue.main.async { if self.referenceKey == key { self.referencePreview = img } }
+                }
+            }
+        }
+        if splitActive || (sideBySideActive && !compareReference) {
             let key = BeforeKey(url: photo.url, settings: before, maxPixel: maxPx)
             if key != beforeKey || beforePreview == nil {
                 beforeKey = key
@@ -2211,7 +2237,25 @@ final class Store: ObservableObject {
         return b
     }
 
-    var splitActive: Bool { splitView && tool == .none && !showBefore && !zoomed }
+    var splitActive: Bool { splitView && !sideBySide && tool == .none && !showBefore && !zoomed }
+    var sideBySideActive: Bool { sideBySide && tool == .none && !showBefore && !zoomed }
+
+    /// Modo de comparación de la barra inferior: 0 después, 1 antes, 2 dividido, 3 lado a lado, 4 referencia.
+    var compareMode: Int {
+        get { showBefore ? 1 : (sideBySide ? (compareReference ? 4 : 3) : (splitView ? 2 : 0)) }
+        set {
+            showBefore = newValue == 1
+            splitView = newValue == 2
+            sideBySide = newValue >= 3
+            compareReference = newValue == 4
+            if newValue >= 2 { zoomed = false }
+        }
+    }
+
+    func setReference(_ id: UUID?) {
+        referenceID = id
+        if id != nil { compareMode = 4 } else if compareReference { compareMode = 0 }
+    }
 
     /// Muestra el indicador de carga solo si el revelado tarda (evita parpadeos).
     private func armBusy() {
@@ -2812,6 +2856,168 @@ final class Store: ObservableObject {
         commit("Restablecer recorte")
     }
 
+    // MARK: Zoom
+
+    /// Zoom en la vista Revelar: 1 = 100 % (un píxel de la foto por píxel de pantalla).
+    @Published var zoomLevel = 1.0
+    /// Centro de la vista dentro de la foto recortada (0…1).
+    @Published var zoomCenter = CGPoint(x: 0.5, y: 0.5)
+    /// Marco del lienzo en coordenadas de la ventana (origen arriba a la izquierda).
+    var canvasFrame = CGRect.zero
+    static let zoomPresets: [Double] = [0.25, 0.5, 1, 2, 4]
+
+    /// Tamaño en puntos de la foto recortada a un nivel de zoom.
+    func displaySize(_ level: Double) -> CGSize {
+        let s = settings
+        return CGSize(width: fullSize.width * s.cropW * level / backingScale, height: fullSize.height * s.cropH * level / backingScale)
+    }
+
+    var fitLevel: Double {
+        let one = displaySize(1)
+        guard one.width > 0, one.height > 0 else { return 1 }
+        return min((viewport.width - 56) / one.width, (viewport.height - 56) / one.height)
+    }
+
+    var zoomPercent: Int { Int(((zoomed ? zoomLevel : fitLevel) * 100).rounded()) }
+
+    func clampedCenter(_ c: CGPoint, _ level: Double) -> CGPoint {
+        let d = displaySize(level)
+        func axis(_ v: CGFloat, _ size: CGFloat, _ view: CGFloat) -> CGFloat {
+            guard size > view else { return 0.5 }
+            let half = view / (2 * size)
+            return min(max(v, half), 1 - half)
+        }
+        return CGPoint(x: axis(c.x, d.width, viewport.width), y: axis(c.y, d.height, viewport.height))
+    }
+
+    /// Acerca a un nivel centrando la vista en un punto de la foto (0…1).
+    func zoom(to level: Double, at p: CGPoint? = nil) {
+        let l = min(max(level, 0.05), 16)
+        guard l > fitLevel * 1.01 else { zoomed = false; return }
+        zoomLevel = l
+        zoomCenter = clampedCenter(p ?? zoomCenter, l)
+        if !zoomed { zoomed = true }
+    }
+
+    /// Cambia el zoom manteniendo fijo el punto de la foto bajo `anchor` (coordenadas del lienzo).
+    func zoom(by factor: Double, anchor: CGPoint) {
+        let vc = CGPoint(x: viewport.width / 2, y: viewport.height / 2)
+        let cur = zoomed ? zoomLevel : fitLevel
+        let d0 = displaySize(cur)
+        guard d0.width > 0, d0.height > 0 else { return }
+        let p = zoomed
+            ? CGPoint(x: zoomCenter.x + (anchor.x - vc.x) / d0.width, y: zoomCenter.y + (anchor.y - vc.y) / d0.height)
+            : CGPoint(x: 0.5 + (anchor.x - vc.x) / d0.width, y: 0.5 + (anchor.y - vc.y) / d0.height)
+        let l = min(max(cur * factor, fitLevel), 16)
+        guard l > fitLevel * 1.01 else { zoomed = false; return }
+        let d1 = displaySize(l)
+        zoomLevel = l
+        zoomCenter = clampedCenter(CGPoint(x: p.x - (anchor.x - vc.x) / d1.width, y: p.y - (anchor.y - vc.y) / d1.height), l)
+        if !zoomed { zoomed = true }
+    }
+
+    func zoomStep(_ dir: Int) {
+        let cur = zoomed ? zoomLevel : fitLevel
+        if dir > 0 {
+            zoom(to: Self.zoomPresets.first { $0 > cur * 1.01 } ?? 16)
+        } else if let l = Self.zoomPresets.last(where: { $0 < cur * 0.99 }), l > fitLevel {
+            zoom(to: l)
+        } else {
+            zoomed = false
+        }
+    }
+
+    // MARK: Rueda, trackpad y deslizadores
+
+    /// Deslizador bajo el ratón: la rueda y las flechas ↑↓ lo ajustan.
+    struct HoverSlider {
+        let id: UUID
+        let get: () -> Double
+        let set: (Double) -> Void
+        let range: ClosedRange<Double>
+        let step: Double
+        let commit: () -> Void
+    }
+
+    private(set) var hoverSlider: HoverSlider?
+    private var hoverSince = Date.distantPast
+    private var scrollToSlider = false
+    private var lastPassScroll = Date.distantPast
+    private var wheelAccum = 0.0
+    private var wheelCommit: DispatchWorkItem?
+
+    func setHoverSlider(_ h: HoverSlider?) {
+        if h?.id != hoverSlider?.id { hoverSince = Date() }
+        hoverSlider = h
+    }
+
+    /// Mueve el deslizador bajo el ratón `steps` pasos (1 paso = 1/200 del recorrido como mínimo).
+    func nudgeSlider(_ steps: Double) {
+        guard let h = hoverSlider else { return }
+        let unit = max(h.step, (h.range.upperBound - h.range.lowerBound) / 200)
+        var v = h.get() + steps * unit
+        v = min(max((v / h.step).rounded() * h.step, h.range.lowerBound), h.range.upperBound)
+        h.set(v)
+        wheelCommit?.cancel()
+        let w = DispatchWorkItem { h.commit() }
+        wheelCommit = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: w)
+    }
+
+    private func handleScroll(_ e: NSEvent) -> Bool {
+        if e.type == .scrollWheel {
+            // Inercia: pertenece al gesto anterior
+            if e.momentumPhase != [] { return scrollToSlider }
+            if e.phase == .began || e.phase == [] {
+                // Solo si el ratón lleva un momento quieto sobre el deslizador y no se está desplazando el panel
+                scrollToSlider = hoverSlider != nil && Date().timeIntervalSince(hoverSince) > 0.35
+                    && Date().timeIntervalSince(lastPassScroll) > 0.5
+            }
+            if scrollToSlider, hoverSlider != nil {
+                let dy = e.scrollingDeltaY != 0 ? e.scrollingDeltaY : e.scrollingDeltaX
+                let phys = e.isDirectionInvertedFromDevice ? -dy : dy
+                wheelAccum += e.hasPreciseScrollingDeltas ? phys / 6 : phys
+                let steps = wheelAccum.rounded(.towardZero)
+                if steps != 0 {
+                    wheelAccum -= steps
+                    nudgeSlider(steps * (e.modifierFlags.contains(.shift) ? 5 : 1))
+                }
+                return true
+            }
+        }
+        guard module == .develop, tool == .none, current != nil, let win = e.window,
+              !splitActive, !sideBySideActive else {
+            if e.type == .scrollWheel { lastPassScroll = Date() }
+            return false
+        }
+        let loc = CGPoint(x: e.locationInWindow.x, y: (win.contentView?.bounds.height ?? 0) - e.locationInWindow.y)
+        guard canvasFrame.contains(loc) else {
+            if e.type == .scrollWheel { lastPassScroll = Date() }
+            return false
+        }
+        let anchor = CGPoint(x: loc.x - canvasFrame.minX, y: loc.y - canvasFrame.minY)
+        if e.type == .magnify {
+            zoom(by: 1 + e.magnification, anchor: anchor)
+            return true
+        }
+        let phys = e.isDirectionInvertedFromDevice ? -e.scrollingDeltaY : e.scrollingDeltaY
+        if !e.hasPreciseScrollingDeltas {
+            // Rueda del ratón: zoom
+            zoom(by: pow(1.15, phys), anchor: anchor)
+            return true
+        }
+        if e.modifierFlags.contains(.command) {
+            zoom(by: pow(1.008, phys), anchor: anchor)
+            return true
+        }
+        guard zoomed else { return false }
+        // Dos dedos: desplazar la foto ampliada
+        let d = displaySize(zoomLevel)
+        zoomCenter = clampedCenter(CGPoint(x: zoomCenter.x - e.scrollingDeltaX / d.width, y: zoomCenter.y - e.scrollingDeltaY / d.height),
+                                   zoomLevel)
+        return true
+    }
+
     // MARK: Teclado
 
     /// Quita el foco de los campos numéricos para que funcionen los atajos de una tecla.
@@ -2823,6 +3029,10 @@ final class Store: ObservableObject {
         switch e.keyCode {
         case 123: step(-1); return true
         case 124: step(1); return true
+        case 125, 126:
+            guard hoverSlider != nil else { return false }
+            nudgeSlider((e.keyCode == 126 ? 1 : -1) * (e.modifierFlags.contains(.shift) ? 5 : 1))
+            return true
         case 36, 76: if tool != .none { tool = .none; return true }; return false
         case 53: if tool != .none { tool = .none; return true }; if zoomed { zoomed = false; return true }; return false
         case 51, 117:
@@ -2845,7 +3055,7 @@ final class Store: ObservableObject {
         case "o": if tool == .mask { showMaskOverlay.toggle() } else { return false }
         case "w": toggleTool(.whiteBalance)
         case "x": if tool == .crop { toggleCropOrientation() } else { return false }
-        case "z", " ": zoomed.toggle()
+        case "z", " ": if zoomed { zoomed = false } else { zoom(to: max(1, fitLevel * 2)) }
         case "g": module = .library
         case "d", "e": module = .develop; scheduleRender()
         default: return false
@@ -3003,7 +3213,8 @@ struct HoverBackground: ViewModifier {
     @Local private var isHover = false
     func body(content: Content) -> some View {
         content
-            .background(RoundedRectangle(cornerRadius: radius).fill(active ? Theme.selection : (isHover ? Theme.fill : Color.clear)))
+            .background(RoundedRectangle(cornerRadius: radius).fill(active ? Theme.accentFill : (isHover ? Theme.fill : Color.clear)))
+            .overlay(RoundedRectangle(cornerRadius: radius).stroke(Theme.accent.opacity(active ? 0.75 : 0), lineWidth: 1))
             .onHover { h in withAnimation(.easeOut(duration: 0.12)) { isHover = h } }
     }
 }
@@ -3034,13 +3245,13 @@ struct GhostButtonBody: View {
         let pressed = configuration.isPressed
         configuration.label
             .font(.system(size: compact ? 10.5 : 11.5, weight: prominent ? .semibold : .medium))
-            .foregroundColor(prominent ? .black : Theme.text)
+            .foregroundColor(prominent ? Theme.onAccent : Theme.text)
             .padding(.horizontal, compact ? 8 : 12)
-            .padding(.vertical, compact ? 3.5 : 5.5)
-            .background(RoundedRectangle(cornerRadius: 6).fill(prominent
-                ? Color.white.opacity(pressed ? 0.72 : (hover ? 0.96 : 0.88))
-                : Color.white.opacity(pressed ? 0.18 : (hover ? 0.12 : 0.07))))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(prominent ? 0 : 0.06), lineWidth: 1))
+            .padding(.vertical, compact ? 3 : 5)
+            .background(RoundedRectangle(cornerRadius: 4).fill(prominent
+                ? Theme.accent.opacity(pressed ? 0.7 : (hover ? 1 : 0.9))
+                : Color.white.opacity(pressed ? 0.18 : (hover ? 0.12 : 0.06))))
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(prominent ? Color.clear : Color.white.opacity(hover ? 0.2 : 0.12), lineWidth: 1))
             .opacity(enabled ? 1 : 0.35)
             .scaleEffect(pressed ? 0.97 : 1)
             .contentShape(Rectangle())
@@ -3060,10 +3271,11 @@ struct IconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: size))
-                .foregroundColor(active ? .white : (hover ? Theme.text : Theme.secondary))
+                .font(.system(size: size, weight: active ? .semibold : .regular))
+                .foregroundColor(active ? Theme.onAccent : (hover ? Theme.text : Theme.secondary))
                 .frame(width: 30, height: 26)
-                .background(RoundedRectangle(cornerRadius: 6).fill(active ? Theme.selection : (hover ? Theme.fill : Color.clear)))
+                .background(RoundedRectangle(cornerRadius: 4).fill(active ? Theme.accent : (hover ? Theme.fill : Color.clear)))
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(active ? Theme.accent : (hover ? Theme.border : Color.clear), lineWidth: 1))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -3083,18 +3295,19 @@ struct Segmented<T: Hashable>: View {
                 let on = opt.0 == selection
                 Text(opt.1)
                     .font(.system(size: 10.5, weight: on ? .semibold : .regular))
-                    .foregroundColor(on ? .white : Theme.secondary)
+                    .foregroundColor(on ? Theme.onAccent : Theme.secondary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
-                    .background(RoundedRectangle(cornerRadius: 5).fill(on ? Color.white.opacity(0.15) : Color.clear))
+                    .padding(.vertical, 3)
+                    .background(RoundedRectangle(cornerRadius: 3).fill(on ? Theme.accent : Color.clear))
                     .contentShape(Rectangle())
                     .onTapGesture { withAnimation(.easeOut(duration: 0.15)) { selection = opt.0 } }
             }
         }
         .padding(2)
-        .background(RoundedRectangle(cornerRadius: 7).fill(Color.black.opacity(0.28)))
-        .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.separator, lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: 5).fill(Color.black.opacity(0.3)))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(Theme.border, lineWidth: 1))
     }
 }
 
@@ -3102,10 +3315,10 @@ struct MonoCheckbox: ToggleStyle {
     func makeBody(configuration: Configuration) -> some View {
         Button { withAnimation(.easeOut(duration: 0.12)) { configuration.isOn.toggle() } } label: {
             HStack(spacing: 7) {
-                RoundedRectangle(cornerRadius: 3.5)
-                    .fill(configuration.isOn ? Color.white : Color.clear)
-                    .overlay(RoundedRectangle(cornerRadius: 3.5).stroke(Color.white.opacity(configuration.isOn ? 0 : 0.35), lineWidth: 1))
-                    .overlay(Image(systemName: "checkmark").font(.system(size: 7.5, weight: .heavy)).foregroundColor(.black)
+                RoundedRectangle(cornerRadius: 2.5)
+                    .fill(configuration.isOn ? Theme.accent : Color.clear)
+                    .overlay(RoundedRectangle(cornerRadius: 2.5).stroke(Color.white.opacity(configuration.isOn ? 0 : 0.4), lineWidth: 1))
+                    .overlay(Image(systemName: "checkmark").font(.system(size: 7.5, weight: .heavy)).foregroundColor(Theme.onAccent)
                         .opacity(configuration.isOn ? 1 : 0))
                     .frame(width: 13, height: 13)
                 configuration.label.font(.system(size: 11)).foregroundColor(Theme.text)
@@ -3150,7 +3363,7 @@ struct SliderTrack: View {
                     .padding(.horizontal, 5)
                 if track == nil {
                     // Relleno desde el valor por defecto hasta el actual: se ve de un vistazo qué se ha tocado
-                    Capsule().fill(Color.white.opacity(0.7))
+                    Capsule().fill(Theme.accent.opacity(0.85))
                         .frame(width: abs(t - d) * (w - 10), height: 2)
                         .offset(x: 5 + min(t, d) * (w - 10))
                 }
@@ -3252,6 +3465,7 @@ struct LRSlider: View {
     let track: [Color]?
     let display: String?
     @Local private var hover = false
+    @Local private var token = UUID()
 
     init(_ label: String, _ value: Binding<Double>, _ range: ClosedRange<Double> = -100...100, def: Double = 0,
          step: Double = 1, decimals: Int = 0, track: [Color]? = nil, display: String? = nil) {
@@ -3284,8 +3498,17 @@ struct LRSlider: View {
                        display: display, onCommit: commit)
                 .frame(width: 42)
         }
-        .frame(height: 20)
-        .onHover { h in withAnimation(.easeOut(duration: 0.1)) { hover = h } }
+        .frame(height: 18)
+        .onHover { h in
+            withAnimation(.easeOut(duration: 0.1)) { hover = h }
+            if h {
+                let b = $value
+                store.setHoverSlider(Store.HoverSlider(id: token, get: { b.wrappedValue }, set: { b.wrappedValue = $0 },
+                                                       range: range, step: step, commit: commit))
+            } else if store.hoverSlider?.id == token {
+                store.setHoverSlider(nil)
+            }
+        }
     }
 
     private func commit() { store.commit("\(label) \(formatValue(value, decimals, range.lowerBound < 0))") }
@@ -3310,10 +3533,10 @@ struct SubHeader: View {
                 .onHover { hover = $0 }
                 .onTapGesture(count: 2) { if let group { store.resetGroup(group, title.lowercased()) } }
                 .help(group != nil ? "Doble clic para restablecer \(title.lowercased())" : "")
-            Spacer()
+            Rectangle().fill(Theme.border).frame(height: 1)
             if let trailing { trailing }
         }
-        .padding(.top, 10)
+        .padding(.top, 6)
         .padding(.bottom, 1)
     }
 }
@@ -3366,9 +3589,9 @@ struct PanelSection<Content: View>: View {
                     .foregroundColor(hover ? Theme.secondary : Theme.dim)
                     .rotationEffect(.degrees(open ? 90 : 0))
             }
-            .padding(.horizontal, 14)
-            .frame(height: 36)
-            .background(hover ? Color.white.opacity(0.025) : Color.clear)
+            .padding(.horizontal, 12)
+            .frame(height: 30)
+            .background(Color.white.opacity(hover ? 0.05 : 0.025))
             .contentShape(Rectangle())
             .onTapGesture { toggleOpen() }
             .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hover = h } }
@@ -3382,10 +3605,10 @@ struct PanelSection<Content: View>: View {
                 }
             }
             if open {
-                VStack(alignment: .leading, spacing: 6) { content }
-                    .padding(.horizontal, 12)
-                    .padding(.top, 0)
-                    .padding(.bottom, 14)
+                VStack(alignment: .leading, spacing: 3) { content }
+                    .padding(.horizontal, 10)
+                    .padding(.top, 4)
+                    .padding(.bottom, 9)
                     .transition(.opacity)
             }
             Rectangle().fill(Theme.separator).frame(height: 1)
@@ -3576,19 +3799,54 @@ struct ToolStrip: View {
     }
 }
 
-struct ToolHeader: View {
+/// Bloque de la herramienta activa: enmarcado en el color de acento para que se distinga de los ajustes globales.
+struct ToolBlock<Content: View>: View {
     let title: String
+    let icon: String
     let onDone: () -> Void
+    let content: Content
+
+    init(_ title: String, icon: String, onDone: @escaping () -> Void, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.icon = icon
+        self.onDone = onDone
+        self.content = content()
+    }
+
     var body: some View {
-        HStack {
-            Text(title).font(.system(size: 12, weight: .semibold)).foregroundColor(.white)
-            Spacer()
-            SmallButton("Hecho", prominent: true, action: onDone)
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: icon).font(.system(size: 11, weight: .semibold)).foregroundColor(Theme.accent)
+                Text(title.uppercased()).font(.system(size: 10.5, weight: .bold)).tracking(0.9).foregroundColor(Theme.accent)
+                Spacer()
+                SmallButton("Hecho", prominent: true, action: onDone)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .background(Theme.accent.opacity(0.1))
+            .overlay(Rectangle().fill(Theme.accent.opacity(0.5)).frame(height: 1), alignment: .bottom)
+            content
         }
-        .padding(.horizontal, 14)
-        .frame(height: 40)
-        .background(Theme.raised)
-        .overlay(Rectangle().fill(Theme.separator).frame(height: 1), alignment: .bottom)
+        .background(Color(white: 0.125))
+        .overlay(Rectangle().fill(Theme.accent).frame(width: 3), alignment: .leading)
+        .overlay(Rectangle().stroke(Theme.accent.opacity(0.55), lineWidth: 1))
+        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
+    }
+}
+
+/// Rótulo que separa bloques del panel derecho.
+struct SectionDivider: View {
+    let title: String
+    init(_ title: String) { self.title = title }
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title.uppercased()).font(.system(size: 9.5, weight: .semibold)).tracking(1).foregroundColor(Theme.dim)
+            Rectangle().fill(Theme.border).frame(height: 1)
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 6)
+        .padding(.bottom, 4)
     }
 }
 
@@ -3631,16 +3889,19 @@ struct RightPanel: View {
             Rectangle().fill(Theme.separator).frame(height: 1)
             switch store.tool {
             case .crop:
-                ToolHeader(title: "Recortar y enderezar") { store.tool = .none }
-                CropPanel()
-                Rectangle().fill(Theme.separator).frame(height: 1)
+                ToolBlock("Recortar y enderezar", icon: "crop", onDone: { store.tool = .none }) { CropPanel() }
+                SectionDivider("Ajustes de la foto")
                 ScrollView { globalPanels }
             case .mask:
-                ToolHeader(title: "Máscaras") { store.tool = .none }
-                ScrollView { MaskPanel() }.transition(.opacity)
+                ToolBlock("Máscaras", icon: "circle.dashed.inset.filled", onDone: { store.tool = .none }) {
+                    ScrollView { MaskPanel().padding(.top, 6) }
+                }
+                .transition(.opacity)
             case .heal:
-                ToolHeader(title: "Eliminar") { store.tool = .none }
-                ScrollView { HealPanel() }.transition(.opacity)
+                ToolBlock("Eliminar", icon: "bandage", onDone: { store.tool = .none }) {
+                    ScrollView { HealPanel().padding(.top, 6) }
+                }
+                .transition(.opacity)
             default:
                 ScrollView { globalPanels }.transition(.opacity)
             }
@@ -4925,8 +5186,7 @@ struct LeftPanel: View {
                     ZStack(alignment: .bottomLeading) {
                         RoundedRectangle(cornerRadius: 5).fill(Color(white: 0.06))
                         if let cg = store.navigatorPreview ?? store.preview {
-                            Image(decorative: cg, scale: 1).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
-                                .padding(4)
+                            NavigatorImage(image: cg, interactive: store.navigatorPreview == nil)
                         }
                         if let label = store.navigatorLabel {
                             Text(label).font(.system(size: 9.5, weight: .medium)).foregroundColor(.white)
@@ -4938,6 +5198,14 @@ struct LeftPanel: View {
                     }
                     .frame(height: 140)
                     .animation(.easeOut(duration: 0.15), value: store.navigatorLabel)
+                    HStack(spacing: 2) {
+                        zoomChip("Encajar", active: !store.zoomed) { store.zoomed = false }
+                        ForEach([0.5, 1.0, 2.0], id: \.self) { l in
+                            zoomChip("\(Int(l * 100)) %", active: store.zoomed && abs(store.zoomLevel - l) < 0.01) { store.zoom(to: l) }
+                        }
+                        Spacer()
+                        Text("\(store.zoomPercent) %").font(.system(size: 10).monospacedDigit()).foregroundColor(Theme.dim)
+                    }
                 }
                 PanelSection("Ajustes preestablecidos") {
                     SubHeader("Integrados")
@@ -4986,6 +5254,15 @@ struct LeftPanel: View {
         .background(Theme.panel)
     }
 
+    private func zoomChip(_ t: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Text(t).font(.system(size: 10, weight: active ? .semibold : .regular).monospacedDigit())
+            .foregroundColor(active ? Theme.onAccent : Theme.secondary)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(RoundedRectangle(cornerRadius: 3).fill(active ? Theme.accent : Theme.fill))
+            .contentShape(Rectangle())
+            .onTapGesture(perform: action)
+    }
+
     private func row(_ name: String, action: @escaping () -> Void) -> some View {
         Text(name)
             .font(.system(size: 11))
@@ -4996,6 +5273,47 @@ struct LeftPanel: View {
             .hoverBackground(radius: 4)
             .contentShape(Rectangle())
             .onTapGesture(perform: action)
+    }
+}
+
+/// Miniatura del Navegador: marca la zona ampliada; clic o arrastre para desplazarse por la foto.
+struct NavigatorImage: View {
+    @EnvironmentObject var store: Store
+    let image: CGImage
+    let interactive: Bool
+
+    var body: some View {
+        GeometryReader { g in
+            let box = CGSize(width: g.size.width - 8, height: g.size.height - 8)
+            let a = CGFloat(image.width) / CGFloat(max(1, image.height))
+            let w = min(box.width, box.height * a), h = w / a
+            let r = CGRect(x: (g.size.width - w) / 2, y: (g.size.height - h) / 2, width: w, height: h)
+            ZStack(alignment: .topLeading) {
+                Image(decorative: image, scale: 1).resizable().interpolation(.high)
+                    .frame(width: w, height: h).offset(x: r.minX, y: r.minY)
+                if interactive && store.zoomed {
+                    let d = store.displaySize(store.zoomLevel)
+                    let vw = min(1, store.viewport.width / max(1, d.width)), vh = min(1, store.viewport.height / max(1, d.height))
+                    let c = store.zoomCenter
+                    Rectangle()
+                        .stroke(Theme.accent, lineWidth: 1.5)
+                        .background(Rectangle().fill(Theme.accent.opacity(0.08)))
+                        .frame(width: vw * w, height: vh * h)
+                        .offset(x: r.minX + (c.x - vw / 2) * w, y: r.minY + (c.y - vh / 2) * h)
+                }
+            }
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0).onChanged { v in
+                guard interactive else { return }
+                let p = CGPoint(x: (v.location.x - r.minX) / w, y: (v.location.y - r.minY) / h)
+                if store.zoomed {
+                    store.zoomCenter = store.clampedCenter(p, store.zoomLevel)
+                } else {
+                    store.zoom(to: max(1, store.fitLevel * 2), at: p)
+                }
+            })
+            .help("Clic para ampliar ahí · arrastra para desplazarte")
+        }
     }
 }
 
@@ -5025,43 +5343,38 @@ struct ImageOverlay: View {
                     .contentShape(Rectangle())
                     .onTapGesture { loc in
                         store.endEditing()
-                        store.zoomAnchor = CGPoint(x: loc.x / g.size.width, y: loc.y / g.size.height)
-                        store.zoomed = true
+                        store.zoom(to: max(1, store.fitLevel * 2), at: CGPoint(x: loc.x / g.size.width, y: loc.y / g.size.height))
                     }
             }
         }
     }
 }
 
-/// Vista 1:1 que se arrastra para desplazarse. Mientras llega el revelado a resolución completa
+/// Vista ampliada que se arrastra para desplazarse. Mientras llega el revelado a resolución completa
 /// muestra la vista previa ampliada, así el cambio de zoom es inmediato.
 struct ZoomedImage: View {
     @EnvironmentObject var store: Store
     let image: CGImage
-    @Local private var offset = CGSize.zero
-    @Local private var dragStart: CGSize?
-    @Local private var placed = false
+    @Local private var dragStart: CGPoint?
 
     var body: some View {
         GeometryReader { g in
-            let s = store.settings
-            let fw = store.fullSize.width * s.cropW / store.backingScale
-            let fh = store.fullSize.height * s.cropH / store.backingScale
-            let maxX = max(0, (fw - g.size.width) / 2), maxY = max(0, (fh - g.size.height) / 2)
+            let d = store.displaySize(store.zoomLevel)
+            let c = store.zoomCenter
             Image(decorative: image, scale: 1)
                 .resizable()
-                .interpolation(.high)
-                .frame(width: fw, height: fh)
-                .offset(x: min(max(offset.width, -maxX), maxX), y: min(max(offset.height, -maxY), maxY))
+                .interpolation(store.zoomLevel >= 2 ? .none : .high)
+                .frame(width: d.width, height: d.height)
+                .offset(x: (0.5 - c.x) * d.width, y: (0.5 - c.y) * d.height)
                 .frame(width: g.size.width, height: g.size.height)
                 .contentShape(Rectangle())
                 .gesture(
                     DragGesture()
                         .onChanged { v in
-                            if dragStart == nil { dragStart = offset }
-                            let st = dragStart ?? .zero
-                            offset = CGSize(width: min(max(st.width + v.translation.width, -maxX), maxX),
-                                            height: min(max(st.height + v.translation.height, -maxY), maxY))
+                            if dragStart == nil { dragStart = c }
+                            let st = dragStart ?? c
+                            store.zoomCenter = store.clampedCenter(CGPoint(x: st.x - v.translation.width / d.width,
+                                                                           y: st.y - v.translation.height / d.height), store.zoomLevel)
                             NSCursor.closedHand.set()
                         }
                         .onEnded { _ in dragStart = nil; NSCursor.openHand.set() }
@@ -5070,14 +5383,37 @@ struct ZoomedImage: View {
                 .onContinuousHover { phase in
                     if case .active = phase { NSCursor.openHand.set() } else { NSCursor.arrow.set() }
                 }
-                .onAppear {
-                    guard !placed else { return }
-                    placed = true
-                    offset = CGSize(width: min(max((0.5 - store.zoomAnchor.x) * fw, -maxX), maxX),
-                                    height: min(max((0.5 - store.zoomAnchor.y) * fh, -maxY), maxY))
-                }
         }
         .clipped()
+    }
+}
+
+/// Antes / después (o referencia / actual) uno junto al otro.
+struct SideBySide: View {
+    @EnvironmentObject var store: Store
+    let after: CGImage
+    let before: CGImage?
+    let leftLabel: String
+    let rightLabel: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            pane(before, leftLabel)
+            pane(after, rightLabel)
+        }
+    }
+
+    private func pane(_ img: CGImage?, _ label: String) -> some View {
+        ZStack(alignment: .topLeading) {
+            if let img {
+                Image(decorative: img, scale: 1).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                    .background(Color.black.shadow(color: .black.opacity(0.55), radius: 12, y: 3))
+            } else {
+                ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            CanvasBadge(text: label).padding(8)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -5161,6 +5497,15 @@ struct CanvasView: View {
                 if let cg = store.preview ?? store.current?.thumbnail {
                     if store.zoomed && store.tool == .none {
                         ZoomedImage(image: cg)
+                    } else if store.sideBySideActive {
+                        if store.compareReference {
+                            let ref = store.photos.first { $0.id == store.referenceID }
+                            SideBySide(after: cg, before: ref == nil ? nil : store.referencePreview,
+                                       leftLabel: ref.map { "Referencia · \($0.name)" } ?? "Elige una referencia (clic derecho en la tira)",
+                                       rightLabel: "Actual").padding(20)
+                        } else {
+                            SideBySide(after: cg, before: store.beforePreview, leftLabel: "Antes", rightLabel: "Después").padding(20)
+                        }
                     } else if store.splitActive, let before = store.beforePreview {
                         SplitCompare(after: cg, before: before).padding(28)
                     } else {
@@ -5195,8 +5540,9 @@ struct CanvasView: View {
             .animation(.easeInOut(duration: 0.2), value: store.busy)
             .animation(.spring(response: 0.35, dampingFraction: 0.85), value: store.status)
             .animation(.easeInOut(duration: 0.2), value: store.zoomed)
-            .onAppear { store.viewport = geo.size }
-            .onChange(of: geo.size) { _, s in store.viewport = s }
+            .onAppear { store.viewport = geo.size; store.canvasFrame = geo.frame(in: .global) }
+            .onChange(of: geo.size) { _, s in store.viewport = s; store.canvasFrame = geo.frame(in: .global) }
+            .onChange(of: geo.frame(in: .global)) { _, f in store.canvasFrame = f }
         }
     }
 
@@ -5204,7 +5550,8 @@ struct CanvasView: View {
         var b: [String] = []
         if store.showBefore { b.append("Antes") }
         if store.activePointOverlay != nil { b.append("Rango del punto de color") }
-        if store.zoomed && store.tool == .none { b.append("1:1") }
+        if store.zoomed && store.tool == .none { b.append("\(store.zoomPercent) %") }
+        if !store.disabledGroups.isEmpty { b.append("Paneles desactivados: vista previa parcial") }
         if store.clipHigh || store.clipLow { b.append("Aviso de recorte") }
         switch store.tool {
         case .whiteBalance: b.append("Haz clic en una zona neutra (gris o blanca)")
@@ -5258,8 +5605,8 @@ struct ThumbCell: View {
             .padding(4)
         }
         .clipShape(RoundedRectangle(cornerRadius: 4))
-        .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Color.white : Color.white.opacity(marked ? 0.55 : (hover ? 0.2 : 0.05)),
-                                                          lineWidth: selected || marked ? 1.5 : 1))
+        .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Theme.accent : Color.white.opacity(marked ? 0.7 : (hover ? 0.2 : 0.05)),
+                                                          lineWidth: selected ? 2 : (marked ? 1.5 : 1)))
         .opacity(selected || marked || hover ? 1 : 0.72)
         .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hover = h } }
     }
@@ -5279,6 +5626,9 @@ struct PhotoContextMenu: View {
         Button("Pegar ajustes copiados") {
             store.select(photo.id)
             store.pasteSettings()
+        }
+        Button(store.referenceID == photo.id ? "Quitar como referencia" : "Usar como referencia para comparar") {
+            store.setReference(store.referenceID == photo.id ? nil : photo.id)
         }
         Divider()
         Button("Quitar del catálogo") { store.remove(photo.id) }
@@ -5396,14 +5746,22 @@ struct BottomBar: View {
     var body: some View {
         HStack(spacing: 12) {
             if store.module == .develop {
-                Segmented(selection: Binding(get: { store.showBefore ? 1 : (store.splitView ? 2 : 0) }, set: { m in
-                    store.showBefore = m == 1
-                    store.splitView = m == 2
-                }), options: [(0, "Después"), (1, "Antes"), (2, "Dividido")])
-                .frame(width: 210)
-                .help("Antes (\\) · Dividido (Y)")
-                IconButton(icon: store.zoomed ? "arrow.down.right.and.arrow.up.left" : "plus.magnifyingglass",
-                           help: store.zoomed ? "Encajar (Z)" : "Zoom 1:1 (Z)", active: store.zoomed, size: 12) { store.zoomed.toggle() }
+                Segmented(selection: Binding(get: { store.compareMode }, set: { store.compareMode = $0 }),
+                          options: [(0, "Después"), (1, "Antes"), (2, "Dividido"), (3, "Lado a lado"), (4, "Referencia")])
+                    .frame(width: 330)
+                    .help("Antes (\\) · Dividido (Y) · Referencia: clic derecho en una miniatura")
+                Menu {
+                    Button("Encajar") { store.zoomed = false }
+                    Divider()
+                    ForEach(Store.zoomPresets, id: \.self) { l in
+                        Button("\(Int(l * 100)) %") { store.zoom(to: l) }
+                    }
+                } label: {
+                    Text(store.zoomed ? "\(store.zoomPercent) %" : "Encajar").font(.system(size: 11).monospacedDigit())
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Zoom: pellizca, usa la rueda o ⌘ + desplazar · Z alterna")
                 IconButton(icon: "triangle.lefthalf.filled", help: "Aviso de recorte de luces y sombras (J)",
                            active: store.clipHigh || store.clipLow, size: 11) {
                     let on = !(store.clipHigh || store.clipLow)
@@ -5601,7 +5959,10 @@ struct RevelaApp: App {
                 Button("Antes / después dividido  (Y)") { store.splitView.toggle() }
                 Button("Aviso de recorte  (J)") { let on = !(store.clipHigh || store.clipLow); store.clipHigh = on; store.clipLow = on }
                 Button("Ocultar paneles  (Tab)") { withAnimation { store.panelsHidden.toggle() } }
-                Button("Zoom  (Z)") { store.zoomed.toggle() }
+                Button("Acercar") { store.zoomStep(1) }.keyboardShortcut("=", modifiers: [.command])
+                Button("Alejar") { store.zoomStep(-1) }.keyboardShortcut("-", modifiers: [.command])
+                Button("Encajar en la ventana") { store.zoomed = false }.keyboardShortcut("0", modifiers: [.command])
+                Button("Antes / después lado a lado") { store.compareMode = store.compareMode == 3 ? 0 : 3 }
                 Divider()
                 Button("Foto anterior  (←)") { store.step(-1) }
                 Button("Foto siguiente  (→)") { store.step(1) }
