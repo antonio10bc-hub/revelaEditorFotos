@@ -389,6 +389,7 @@
 "Recortar  (R)" = "Crop  (R)";
 "Recortar y enderezar" = "Crop & Straighten";
 "Recortar y enderezar (R)" = "Crop & Straighten (R)";
+"Recorte simétrico desde el centro" = "Symmetric crop from the center";
 "Redes sociales · JPEG 1080 px de ancho, sin metadatos" = "Social media · JPEG 1080 px wide, no metadata";
 "Redondez" = "Roundness";
 "Reducción de ruido" = "Noise Reduction";
@@ -477,4 +478,6 @@
 "⇧⌘I  ·  o arrástralas a la ventana" = "⇧⌘I  ·  or drag them into the window";
 "⌘ / ⇧ + clic" = "⌘ / ⇧ + click";
 "⌥ + arrastrar" = "⌥ + drag";
+"⌥ + arrastrar una esquina o un borde: recorte simétrico desde el centro." = "⌥ + drag a corner or edge: symmetric crop from the center.";
+"⌥ + esquina" = "⌥ + corner";
 "⌥-clic: abrir solo este panel" = "⌥-click: open only this panel";

@@ -157,6 +157,8 @@ EN = {
     "Restablecer un deslizador": "Reset a slider", "Z / espacio": "Z / space", "⌥ + arrastrar": "⌥ + drag",
     "⇧⌘I  ·  o arrástralas a la ventana": "⇧⌘I  ·  or drag them into the window", "⌘ / ⇧ + clic": "⌘ / ⇧ + click",
     "Hecho": "Done", "Manchas": "Spots", "Orientación": "Orientation",
+    "⌥ + arrastrar una esquina o un borde: recorte simétrico desde el centro.": "⌥ + drag a corner or edge: symmetric crop from the center.",
+    "⌥ + esquina": "⌥ + corner", "Recorte simétrico desde el centro": "Symmetric crop from the center",
     # Monitores, falso color, lupa y evaluación de color
     "Histograma": "Histogram", "Forma de onda (luminancia)": "Waveform (luminance)", "Desfile RGB": "RGB parade",
     "Vectorscopio": "Vectorscope", "Falso color": "False color", "Falso color  (F)": "False color  (F)",

@@ -4591,6 +4591,8 @@ struct CropPanel: View {
                 SmallButton("Restablecer recorte") { store.resetCrop() }
                 Spacer()
             }
+            HintText("⌥ + arrastrar una esquina o un borde: recorte simétrico desde el centro.")
+                .padding(.top, 2)
         }
         .padding(.horizontal, 10)
         .padding(.top, 4)
@@ -5794,7 +5796,12 @@ struct CropOverlay: View {
                         if mode == nil { startRect = rect; mode = hitTest(v.startLocation, r) }
                         guard let mode else { return }
                         let dx = v.translation.width / size.width, dy = v.translation.height / size.height
-                        rect = update(mode, startRect, dx, dy)
+                        // ⌥: esquinas y bordes cambian el recorte desde el centro, por igual en todos los lados
+                        if NSEvent.modifierFlags.contains(.option), mode != .move {
+                            rect = symmetric(mode, startRect, dx, dy)
+                        } else {
+                            rect = update(mode, startRect, dx, dy)
+                        }
                     }
                     .onEnded { _ in
                         if mode != nil { onCommit() }
@@ -5848,6 +5855,33 @@ struct CropOverlay: View {
             }
             return CGRect(x: sx > 0 ? a.x : a.x - w, y: sy > 0 ? a.y : a.y - h, width: w, height: h)
         }
+    }
+
+    /// Redimensiona alrededor del centro del recorte inicial (⌥ mantenido).
+    private func symmetric(_ mode: Mode, _ s: CGRect, _ dx: CGFloat, _ dy: CGFloat) -> CGRect {
+        let minS: CGFloat = 0.03
+        let cx = s.midX, cy = s.midY
+        let maxW = 2 * min(cx, 1 - cx), maxH = 2 * min(cy, 1 - cy)
+        var w = s.width, h = s.height
+        switch mode {
+        case .corner(let c):
+            let px = (c == 1 || c == 2 ? s.maxX : s.minX) + dx, py = (c == 2 || c == 3 ? s.maxY : s.minY) + dy
+            w = max(minS, 2 * abs(px - cx)); h = max(minS, 2 * abs(py - cy))
+        case .edge(let e):
+            if e == 0 || e == 2 { h = max(minS, 2 * abs((e == 0 ? s.minY : s.maxY) + dy - cy)) }
+            else { w = max(minS, 2 * abs((e == 3 ? s.minX : s.maxX) + dx - cx)) }
+        case .move:
+            return s
+        }
+        if let ratio {
+            let rr = CGFloat(ratio)
+            if w / h > rr { w = h * rr } else { h = w / rr }
+            if w > maxW { w = maxW; h = w / rr }
+            if h > maxH { h = maxH; w = h * rr }
+        } else {
+            w = min(w, maxW); h = min(h, maxH)
+        }
+        return CGRect(x: cx - w / 2, y: cy - h / 2, width: w, height: h)
     }
 }
 
@@ -6875,7 +6909,7 @@ struct ShortcutsSheet: View {
     @Environment(\.dismiss) private var dismiss
     private let groups: [(String, [(String, String)])] = [
         ("Herramientas", [("R", "Recortar y enderezar"), ("Q", "Eliminar manchas"), ("M", "Máscaras"), ("W", "Balance de blancos"),
-                          ("O", "Superposición de máscara"), ("H", "Mostrar puntos de corrección"), ("X", "Orientación del recorte"),
+                          ("O", "Superposición de máscara"), ("⌥ + esquina", "Recorte simétrico desde el centro"), ("H", "Mostrar puntos de corrección"), ("X", "Orientación del recorte"),
                           ("↩ / Esc", "Cerrar herramienta"), ("⌫", "Borrar máscara o corrección")]),
         ("Vista", [("Z / espacio", "Zoom 1:1"), ("\\", "Antes"), ("Y", "Antes / después dividido"), ("J", "Aviso de recorte"), ("F", "Falso color"), ("L", "Lupa"), ("C", "Evaluación de color"),
                    ("Tab", "Ocultar paneles"), ("G / D", "Biblioteca / Revelar"), ("← →", "Foto anterior / siguiente"),
