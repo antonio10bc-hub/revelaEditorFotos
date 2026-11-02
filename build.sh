@@ -1,9 +1,9 @@
 #!/bin/zsh
-# Compila Revela.swift y lo empaqueta como Revela.app
+# Compila Revela.swift y lo empaqueta como Revela10bc.app
 set -e
 cd "$(dirname "$0")"
 
-APP=Revela.app
+APP=Revela10bc.app
 mkdir -p build
 swiftc -parse-as-library -O -swift-version 5 \
   -target "$(uname -m)-apple-macos14.0" \
@@ -11,7 +11,7 @@ swiftc -parse-as-library -O -swift-version 5 \
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp build/Revela "$APP/Contents/MacOS/Revela"
+cp build/Revela "$APP/Contents/MacOS/Revela10bc"
 [[ -f AppIcon.icns ]] || swift make_icon.swift
 cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # Idiomas: español (base, las claves) e inglés
@@ -24,10 +24,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>Revela</string>
-  <key>CFBundleDisplayName</key><string>Revela</string>
+  <key>CFBundleName</key><string>Revela10bc</string>
+  <key>CFBundleDisplayName</key><string>Revela10bc</string>
   <key>CFBundleIdentifier</key><string>local.revela.app</string>
-  <key>CFBundleExecutable</key><string>Revela</string>
+  <key>CFBundleExecutable</key><string>Revela10bc</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleDevelopmentRegion</key><string>es</string>
   <key>CFBundleLocalizations</key><array><string>es</string><string>en</string></array>

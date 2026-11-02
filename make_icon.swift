@@ -1,74 +1,83 @@
-// Genera AppIcon.icns: cuadrado oscuro estilo app de revelado con un smiley amarillo verdoso eléctrico.
+// Genera AppIcon.icns: el histograma del panel de Revela10bc sobre un cuadrado carbón (estilo ficha técnica),
+// con rejilla en cuartos, marcas de recorte, escala inferior y el marcador verde en el pico.
 //
-// Uso:   swift make_icon.swift   (crea AppIcon.iconset y AppIcon.icns junto a este archivo)
+// Uso:   swift make_icon.swift   (crea AppIcon.icns junto a este archivo)
 
 import AppKit
 import CoreGraphics
 
-let lime = CGColor(red: 0.80, green: 1.0, blue: 0.10, alpha: 1)
-let limeLight = CGColor(red: 0.93, green: 1.0, blue: 0.55, alpha: 1)
-let limeDeep = CGColor(red: 0.58, green: 0.86, blue: 0.0, alpha: 1)
-let ink = CGColor(red: 0.04, green: 0.07, blue: 0.13, alpha: 1)
+let tile = CGColor(red: 0.078, green: 0.082, blue: 0.082, alpha: 1)
+let outline = CGColor(red: 0.173, green: 0.180, blue: 0.176, alpha: 1)
+let frameLine = CGColor(red: 0.227, green: 0.235, blue: 0.231, alpha: 1)
+let grid = CGColor(red: 0.149, green: 0.157, blue: 0.153, alpha: 1)
+let light = CGColor(red: 0.894, green: 0.902, blue: 0.882, alpha: 1)
+let gray = CGColor(red: 0.424, green: 0.439, blue: 0.416, alpha: 1)
+let accent = CGColor(red: 0.643, green: 0.784, blue: 0.4, alpha: 1)
 
+/// Dibuja en coordenadas de 1024 con el origen arriba a la izquierda (como el diseño).
 func drawIcon(_ c: CGContext, _ S: CGFloat) {
     let k = S / 1024
-    // Rejilla de iconos de macOS: cuadrado redondeado de 824 px centrado
-    let tile = CGRect(x: 100 * k, y: 100 * k, width: 824 * k, height: 824 * k)
-    let shape = CGPath(roundedRect: tile, cornerWidth: 185 * k, cornerHeight: 185 * k, transform: nil)
+    c.translateBy(x: 0, y: S)
+    c.scaleBy(x: k, y: -k)
 
+    // Rejilla de iconos de macOS: cuadrado redondeado de 824 px centrado
+    let shape = CGPath(roundedRect: CGRect(x: 100, y: 100, width: 824, height: 824), cornerWidth: 186, cornerHeight: 186, transform: nil)
     c.saveGState()
-    c.setShadow(offset: CGSize(width: 0, height: -10 * k), blur: 28 * k, color: CGColor(gray: 0, alpha: 0.45))
+    c.setShadow(offset: CGSize(width: 0, height: 10), blur: 28, color: CGColor(gray: 0, alpha: 0.45))
     c.addPath(shape)
-    c.setFillColor(ink)
+    c.setFillColor(tile)
     c.fillPath()
     c.restoreGState()
-
-    // Fondo: azul noche con un leve brillo arriba
-    c.saveGState()
-    c.addPath(shape)
-    c.clip()
-    let bg = CGGradient(colorsSpace: nil, colors: [CGColor(red: 0.10, green: 0.15, blue: 0.25, alpha: 1), ink] as CFArray, locations: [0, 1])!
-    c.drawLinearGradient(bg, start: CGPoint(x: 0, y: tile.maxY), end: CGPoint(x: 0, y: tile.minY), options: [])
-    let glow = CGGradient(colorsSpace: nil, colors: [CGColor(red: 0.8, green: 1, blue: 0.1, alpha: 0.22), CGColor(red: 0.8, green: 1, blue: 0.1, alpha: 0)] as CFArray, locations: [0, 1])!
-    c.drawRadialGradient(glow, startCenter: CGPoint(x: 512 * k, y: 512 * k), startRadius: 0,
-                         endCenter: CGPoint(x: 512 * k, y: 512 * k), endRadius: 420 * k, options: [])
-    c.restoreGState()
-
-    // Borde interior fino
-    c.saveGState()
-    c.addPath(CGPath(roundedRect: tile.insetBy(dx: 3 * k, dy: 3 * k), cornerWidth: 182 * k, cornerHeight: 182 * k, transform: nil))
-    c.setStrokeColor(CGColor(red: 0.8, green: 1, blue: 0.1, alpha: 0.18))
-    c.setLineWidth(5 * k)
+    c.addPath(CGPath(roundedRect: CGRect(x: 102, y: 102, width: 820, height: 820), cornerWidth: 184, cornerHeight: 184, transform: nil))
+    c.setStrokeColor(outline)
+    c.setLineWidth(4)
     c.strokePath()
-    c.restoreGState()
 
-    // Smiley
-    let center = CGPoint(x: 512 * k, y: 505 * k), R = 268 * k
-    let face = CGRect(x: center.x - R, y: center.y - R, width: 2 * R, height: 2 * R)
-    c.saveGState()
-    c.setShadow(offset: .zero, blur: 70 * k, color: CGColor(red: 0.8, green: 1, blue: 0.1, alpha: 0.75))
-    c.setFillColor(lime)
-    c.fillEllipse(in: face)
-    c.restoreGState()
-    c.saveGState()
-    c.addEllipse(in: face)
-    c.clip()
-    let shade = CGGradient(colorsSpace: nil, colors: [limeLight, lime, limeDeep] as CFArray, locations: [0, 0.5, 1])!
-    c.drawRadialGradient(shade, startCenter: CGPoint(x: center.x - 90 * k, y: center.y + 110 * k), startRadius: 0,
-                         endCenter: center, endRadius: R * 1.05, options: [.drawsAfterEndLocation])
-    c.restoreGState()
-
-    // Ojos y boca
-    c.setFillColor(ink)
-    for dx in [-95.0, 95.0] {
-        c.fillEllipse(in: CGRect(x: center.x + CGFloat(dx) * k - 32 * k, y: center.y + 45 * k, width: 64 * k, height: 96 * k))
+    // Marco del histograma y rejilla en cuartos
+    c.setStrokeColor(grid)
+    c.setLineWidth(5)
+    for x in [362.0, 512, 662] {
+        c.move(to: CGPoint(x: x, y: 282)); c.addLine(to: CGPoint(x: x, y: 742))
     }
-    c.setStrokeColor(ink)
-    c.setLineWidth(46 * k)
-    c.setLineCap(.round)
-    c.addArc(center: CGPoint(x: center.x, y: center.y + 20 * k), radius: 165 * k,
-             startAngle: .pi * 1.18, endAngle: .pi * 1.82, clockwise: false)
     c.strokePath()
+    c.setStrokeColor(frameLine)
+    c.setLineWidth(6)
+    c.stroke(CGRect(x: 212, y: 282, width: 600, height: 460))
+
+    // Histograma
+    let h = CGMutablePath()
+    h.move(to: CGPoint(x: 212, y: 742))
+    h.addCurve(to: CGPoint(x: 300, y: 650), control1: CGPoint(x: 250, y: 738), control2: CGPoint(x: 270, y: 690))
+    h.addCurve(to: CGPoint(x: 380, y: 600), control1: CGPoint(x: 330, y: 610), control2: CGPoint(x: 350, y: 640))
+    h.addCurve(to: CGPoint(x: 470, y: 430), control1: CGPoint(x: 410, y: 560), control2: CGPoint(x: 430, y: 470))
+    h.addCurve(to: CGPoint(x: 560, y: 500), control1: CGPoint(x: 505, y: 395), control2: CGPoint(x: 525, y: 470))
+    h.addCurve(to: CGPoint(x: 650, y: 470), control1: CGPoint(x: 595, y: 530), control2: CGPoint(x: 615, y: 455))
+    h.addCurve(to: CGPoint(x: 750, y: 650), control1: CGPoint(x: 690, y: 488), control2: CGPoint(x: 710, y: 600))
+    h.addCurve(to: CGPoint(x: 812, y: 735), control1: CGPoint(x: 780, y: 690), control2: CGPoint(x: 795, y: 725))
+    h.addLine(to: CGPoint(x: 812, y: 742))
+    h.closeSubpath()
+    c.addPath(h)
+    c.setFillColor(light)
+    c.fillPath()
+
+    // Avisos de recorte y escala inferior
+    c.setFillColor(gray)
+    for x in [232.0, 762] {
+        c.move(to: CGPoint(x: x, y: 272)); c.addLine(to: CGPoint(x: x + 30, y: 272)); c.addLine(to: CGPoint(x: x + 15, y: 246))
+        c.closePath()
+    }
+    c.fillPath()
+    c.setStrokeColor(gray)
+    c.setLineWidth(6)
+    for i in 0...8 {
+        let x = 212 + CGFloat(i) * 75
+        c.move(to: CGPoint(x: x, y: 762)); c.addLine(to: CGPoint(x: x, y: i % 4 == 0 ? 800 : 784))
+    }
+    c.strokePath()
+
+    // Marcador verde en el pico
+    c.setFillColor(accent)
+    c.fill(CGRect(x: 451, y: 386, width: 36, height: 36))
 }
 
 func png(_ size: Int) -> Data {

@@ -1,6 +1,6 @@
-// Revela — editor de fotos RAW para macOS inspirado en el módulo Revelar de Lightroom.
+// Revela10bc — editor de fotos RAW para macOS inspirado en el módulo Revelar de Lightroom.
 //
-// Compilar y abrir:   ./build.sh && open Revela.app
+// Compilar y abrir:   ./build.sh && open Revela10bc.app
 // (o directamente:    swiftc -parse-as-library -O -swift-version 5 Revela.swift -o Revela && ./Revela)
 //
 // Edición no destructiva: los ajustes se guardan en
@@ -38,7 +38,7 @@ enum AppLanguage: String, CaseIterable, Identifiable {
         guard l != current else { return }
         UserDefaults.standard.set([l.rawValue], forKey: "AppleLanguages")
         let a = NSAlert()
-        a.messageText = l == .en ? "Restart Revela to switch to English?" : "¿Reiniciar Revela para cambiar a español?"
+        a.messageText = l == .en ? "Restart Revela10bc to switch to English?" : "¿Reiniciar Revela10bc para cambiar a español?"
         a.addButton(withTitle: l == .en ? "Restart now" : "Reiniciar ahora")
         a.addButton(withTitle: l == .en ? "Later" : "Más tarde")
         guard a.runModal() == .alertFirstButtonReturn else { return }
@@ -1843,7 +1843,7 @@ final class Engine: @unchecked Sendable {
             props[k] = d
         }
         if var tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
-            tiff[kCGImagePropertyTIFFSoftware] = "Revela"
+            tiff[kCGImagePropertyTIFFSoftware] = "Revela10bc"
             props[kCGImagePropertyTIFFDictionary] = tiff
         }
         return props
@@ -6445,7 +6445,7 @@ struct TopBar: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Text("Revela").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
+            Text("Revela10bc").font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
             if store.module == .develop {
                 IconButton(icon: "sidebar.left", help: "Mostrar u ocultar el panel izquierdo", active: false, size: 12) {
                     withAnimation(.easeInOut(duration: 0.22)) { showLeft.toggle() }
@@ -6703,7 +6703,7 @@ struct RevelaApp: App {
     @StateObject private var store = Store()
 
     var body: some Scene {
-        WindowGroup("Revela") {
+        WindowGroup("Revela10bc") {
             ContentView()
                 .environmentObject(store)
                 .environmentObject(store.previews)

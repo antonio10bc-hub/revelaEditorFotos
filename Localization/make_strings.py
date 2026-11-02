@@ -232,9 +232,9 @@ EN = {
 }
 
 # Textos que no se traducen (códigos, teclas, nombres propios, formatos)
-SAME = re.compile(r"^(?:[A-Z]|[A-Z]{2,5}|[\d x/]+|IMG_0001|Revela|English|Español|Tab|MP|G / D|"
-                  r"Later|Restart now|Restart Revela to switch to English\?|Reiniciar ahora|Más tarde|"
-                  r"¿Reiniciar Revela para cambiar a español\?|-c|/bin/sh|%.*|f/%.1f|[⌘⌥⇧↩←→\s/A-Z\[\]·Esc]+)$")
+SAME = re.compile(r"^(?:[A-Z]|[A-Z]{2,5}|[\d x/]+|IMG_0001|Revela10bc|Revela|English|Español|Do Nothing|Fill|Minimize|None|Tab|MP|G / D|"
+                  r"Later|Restart now|Restart Revela10bc to switch to English\?|Reiniciar ahora|Más tarde|"
+                  r"¿Reiniciar Revela10bc para cambiar a español\?|-c|/bin/sh|%.*|f/%.1f|[⌘⌥⇧↩←→\s/A-Z\[\]·Esc]+)$")
 
 
 def escape(s):
