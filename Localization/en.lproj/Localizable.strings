@@ -90,6 +90,7 @@
 "Cantidad" = "Amount";
 "Carpeta" = "Folder";
 "Carpeta elegida" = "Chosen folder";
+"Casi blanco" = "Near white";
 "Cerrar" = "Close";
 "Cerrar herramienta" = "Close tool";
 "Claridad" = "Clarity";
@@ -117,6 +118,7 @@
 "Del usuario" = "User presets";
 "Desactivar el panel para ver qué aporta" = "Disable the panel to see what it adds";
 "Desde" = "From";
+"Desfile RGB" = "RGB parade";
 "Desflecar" = "Defringe";
 "Deshacer" = "Undo";
 "Deshacer / rehacer" = "Undo / redo";
@@ -168,6 +170,9 @@
 "Equilibrio" = "Balance";
 "Escala" = "Scale";
 "Esta pantalla no muestra HDR: verás las luces recortadas, pero el HEIC exportado sí las conserva." = "This display can't show HDR: highlights will look clipped, but the exported HEIC keeps them.";
+"Evaluación de color" = "Color assessment";
+"Evaluación de color  (C)" = "Color assessment  (C)";
+"Evaluación de color: fondo gris y marco blanco (C)" = "Color assessment: gray background and white frame (C)";
 "Expandir todos" = "Expand all";
 "Exportación cancelada: %@ fotos" = "Export canceled: %@ photos";
 "Exportadas %@ fotos" = "Exported %@ photos";
@@ -178,10 +183,14 @@
 "Exposición" = "Exposure";
 "Exposición igualada en %@ foto" = "Exposure matched on %@ photo";
 "Exposición igualada en %@ fotos" = "Exposure matched on %@ photos";
+"Falso color" = "False color";
+"Falso color  (F)" = "False color  (F)";
+"Falso color de exposición (F)" = "Exposure false color (F)";
 "Flash" = "Flash";
 "Flujo" = "Flow";
 "Fluorescente" = "Fluorescent";
 "Fondo" = "Background";
+"Forma de onda (luminancia)" = "Waveform (luminance)";
 "Formato" = "Format";
 "Foto" = "Photo";
 "Foto actual: %@ × %@ px" = "Current photo: %@ × %@ px";
@@ -205,6 +214,7 @@
 "Gradación de color" = "Color Grading";
 "Gradación: %@" = "Color grading: %@";
 "Granulado" = "Grain";
+"Gris medio" = "Middle gray";
 "Guarda los ajustes actuales (sin recorte ni geometría)." = "Saves the current settings (without crop or geometry).";
 "Guardar" = "Save";
 "Guardar los ajustes actuales como preestablecido (⇧⌘N)" = "Save the current settings as a preset (⇧⌘N)";
@@ -219,6 +229,7 @@
 "Haz clic sobre una mancha para eliminarla: el origen se elige solo. Arrastra el círculo discontinuo para usar otro origen. ⌫ borra la seleccionada." = "Click a spot to remove it: the source is picked automatically. Drag the dashed circle to use another source. ⌫ deletes the selected one.";
 "Hecho" = "Done";
 "Herramientas" = "Tools";
+"Histograma" = "Histogram";
 "Historial" = "History";
 "Horizontal" = "Horizontal";
 "INV" = "INV";
@@ -256,6 +267,10 @@
 "Localizar…" = "Locate…";
 "Luminancia" = "Luminance";
 "Luminancia %@" = "Luminance %@";
+"Lupa" = "Loupe";
+"Lupa  (L)" = "Loupe  (L)";
+"Lupa 100 %" = "Loupe 100 %";
+"Lupa al 100 % bajo el cursor (L)" = "100 % loupe under the cursor (L)";
 "Luz" = "Light";
 "Luz de día" = "Daylight";
 "Magenta" = "Magenta";
@@ -286,6 +301,7 @@
 "Mostrar sombras empastadas en azul (J)" = "Show clipped shadows in blue (J)";
 "Mostrar u ocultar el panel izquierdo" = "Show or hide the left panel";
 "Mover corrección" = "Move spot";
+"Muy oscuro" = "Very dark";
 "Máscara" = "Masking";
 "Máscaras" = "Masks";
 "Máscaras  (M)" = "Masks  (M)";
@@ -294,6 +310,7 @@
 "Naranja" = "Orange";
 "Navegador" = "Navigator";
 "Neblina" = "Dehaze";
+"Negro" = "Black";
 "Negros" = "Blacks";
 "Neutro" = "Neutral";
 "Ninguno (eliminar)" = "None (remove)";
@@ -342,6 +359,7 @@
 "Perfil %@" = "Profile %@";
 "Personalizado" = "Custom";
 "Personas" = "People";
+"Piel +1" = "Skin +1";
 "Pincel" = "Brush";
 "Pinta sobre la foto para añadir zona a la máscara." = "Paint on the photo to add area to the mask.";
 "Porcentaje" = "Percent";
@@ -354,6 +372,7 @@
 "Punto de color" = "Point Color";
 "Punto medio" = "Midpoint";
 "Púrpura" = "Purple";
+"Quemado" = "Clipped";
 "Quitar como referencia" = "Remove as reference";
 "Quitar del catálogo" = "Remove from catalog";
 "Quitar inversión" = "Remove inversion";
@@ -436,6 +455,7 @@
 "Usar correcciones de perfil (RAW)" = "Use profile corrections (RAW)";
 "Valor" = "Value";
 "Variación" = "Variance";
+"Vectorscopio" = "Vectorscope";
 "Verde" = "Green";
 "Vertical" = "Vertical";
 "Vista" = "View";

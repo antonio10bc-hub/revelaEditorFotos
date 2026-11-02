@@ -880,6 +880,34 @@ enum LUTBuilder {
         return out.withUnsafeBufferPointer { Data(buffer: $0) }
     }
 
+    /// Falso color: pinta por zonas de exposición (valor sRGB mostrado) y deja el resto en gris.
+    /// Morado = negro empastado, azul = muy oscuro, verde = gris medio (18 %), rosa = piel (+1 paso),
+    /// amarillo = casi blanco, rojo = quemado.
+    static let falseColorZones: [(lo: Double, hi: Double, color: (Float, Float, Float), label: String)] = [
+        (0, 0.02, (0.55, 0.2, 0.85), "Negro"), (0.02, 0.08, (0.15, 0.4, 1), "Muy oscuro"),
+        (0.42, 0.50, (0.3, 0.78, 0.35), "Gris medio"), (0.60, 0.68, (1, 0.5, 0.72), "Piel +1"),
+        (0.92, 0.98, (1, 0.86, 0.2), "Casi blanco"), (0.98, 1.01, (1, 0.15, 0.15), "Quemado"),
+    ]
+
+    static func falseColor() -> Data {
+        let n = clipSize
+        var out = [Float](repeating: 0, count: n * n * n * 4)
+        let inv = 1.0 / Double(n - 1)
+        var i = 0
+        for bi in 0..<n {
+            for gi in 0..<n {
+                for ri in 0..<n {
+                    let y = CMath.luma(Double(ri) * inv, Double(gi) * inv, Double(bi) * inv)
+                    var c = (Float(y), Float(y), Float(y))
+                    for z in falseColorZones where y >= z.lo && y < z.hi { c = z.color }
+                    out[i] = c.0; out[i + 1] = c.1; out[i + 2] = c.2; out[i + 3] = 1
+                    i += 4
+                }
+            }
+        }
+        return out.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+
     static let clipSize = 64
 
     /// LUT identidad que pinta de rojo los canales quemados y de azul el negro puro.
@@ -1009,6 +1037,7 @@ final class Engine: @unchecked Sendable {
         var clipHigh = false        // aviso de luces quemadas
         var clipLow = false         // aviso de sombras empastadas
         var stopBeforeMasks = false // devuelve la imagen justo antes de las máscaras (para muestrear color)
+        var falseColor = false      // pinta las zonas de exposición
     }
 
     struct Result {
@@ -1045,6 +1074,7 @@ final class Engine: @unchecked Sendable {
     /// Valor máximo de la imagen en esta pasada: 1 en SDR, 2^rango en HDR.
     private var limit: CGFloat = 1
     private var pointMaskCache: (key: [Double], data: Data)?
+    private var falseColorData = Data()
 
     // MARK: Base (decodificación)
 
@@ -1410,7 +1440,10 @@ final class Engine: @unchecked Sendable {
     /// Capas solo de visualización: aviso de recorte y superposición roja de la máscara.
     private func decorate(_ input: CIImage, _ req: Request, overlay: CIImage?) -> CIImage {
         var img = input
-        if req.clipHigh || req.clipLow {
+        if req.falseColor {
+            if falseColorData.isEmpty { falseColorData = LUTBuilder.falseColor() }
+            img = applyCube(img.applyingFilter("CIColorClamp"), falseColorData, LUTBuilder.clipSize)
+        } else if req.clipHigh || req.clipLow {
             let key = [req.clipHigh ? 1.0 : 0, req.clipLow ? 1.0 : 0]
             if clipKey != key { clipData = LUTBuilder.clipWarning(high: req.clipHigh, low: req.clipLow); clipKey = key }
             img = applyCube(img.applyingFilter("CIColorClamp"), clipData, LUTBuilder.clipSize)
@@ -2077,6 +2110,96 @@ enum ImageUtil {
     }
 }
 
+enum ScopeMode: Int, CaseIterable {
+    case histogram, waveform, parade, vectorscope
+}
+
+/// Monitores de vídeo (forma de onda, desfile RGB, vectorscopio) sobre la vista previa reducida.
+/// Devuelven una imagen con fondo transparente; la retícula la dibuja la vista.
+enum Scopes {
+    static func compute(_ cg: CGImage, _ mode: ScopeMode) -> CGImage? {
+        guard mode != .histogram else { return nil }
+        let sc = min(1, 320 / Double(max(cg.width, cg.height)))
+        let w = max(1, Int(Double(cg.width) * sc)), h = max(1, Int(Double(cg.height) * sc))
+        var px = [UInt8](repeating: 0, count: w * h * 4)
+        px.withUnsafeMutableBytes { p in
+            guard let c = CGContext(data: p.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                    space: sRGBSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+            c.interpolationQuality = .low
+            c.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        }
+        switch mode {
+        case .waveform:
+            let W = 256, H = 128
+            var acc = [Float](repeating: 0, count: W * H)
+            for y in 0..<h {
+                for x in 0..<w {
+                    let i = (y * w + x) * 4
+                    let l = (Int(px[i]) * 54 + Int(px[i + 1]) * 183 + Int(px[i + 2]) * 19) >> 8
+                    acc[(H - 1 - l * (H - 1) / 255) * W + x * W / w] += 1
+                }
+            }
+            return image(W, H, acc, gain: Float(W * H) / Float(w * h) * 0.4) { _ in (0.9, 0.91, 0.88) }
+        case .parade:
+            let P = 128, gap = 6, W = P * 3 + gap * 2, H = 128
+            var acc = [Float](repeating: 0, count: W * H)
+            for y in 0..<h {
+                for x in 0..<w {
+                    let i = (y * w + x) * 4
+                    for ch in 0..<3 {
+                        let v = Int(px[i + ch])
+                        acc[(H - 1 - v * (H - 1) / 255) * W + ch * (P + gap) + x * P / w] += 1
+                    }
+                }
+            }
+            let colors: [(Float, Float, Float)] = [(0.95, 0.35, 0.33), (0.4, 0.85, 0.42), (0.42, 0.58, 1)]
+            return image(W, H, acc, gain: Float(P * H) / Float(w * h) * 0.4) { col in colors[min(2, col / (P + gap))] }
+        case .vectorscope:
+            let S = 160
+            var acc = [Float](repeating: 0, count: S * S)
+            for y in 0..<h {
+                for x in 0..<w {
+                    let i = (y * w + x) * 4
+                    let (cb, cr) = chroma(Double(px[i]) / 255, Double(px[i + 1]) / 255, Double(px[i + 2]) / 255)
+                    let vx = Int((Double(S) / 2 + cb * Double(S) * 0.9).rounded())
+                    let vy = Int((Double(S) / 2 - cr * Double(S) * 0.9).rounded())
+                    guard vx >= 0, vy >= 0, vx < S, vy < S else { continue }
+                    acc[vy * S + vx] += 1
+                }
+            }
+            return image(S, S, acc, gain: Float(S * S) / Float(w * h) * 1.2) { _ in (0.9, 0.91, 0.88) }
+        case .histogram:
+            return nil
+        }
+    }
+
+    /// Cb y Cr (BT.709, −0,5…0,5) de un color sRGB: la posición en el vectorscopio.
+    static func chroma(_ r: Double, _ g: Double, _ b: Double) -> (Double, Double) {
+        let y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        return ((b - y) / 1.8556, (r - y) / 1.5748)
+    }
+
+    /// Densidad → brillo con una curva suave (1 − e^−k·n): se ven tanto las zonas raras como las densas.
+    private static func image(_ W: Int, _ H: Int, _ acc: [Float], gain: Float,
+                              color: (Int) -> (Float, Float, Float)) -> CGImage? {
+        var out = [UInt8](repeating: 0, count: W * H * 4)
+        for y in 0..<H {
+            for x in 0..<W {
+                let n = acc[y * W + x]
+                guard n > 0 else { continue }
+                let a = 1 - exp(-n * gain)
+                let (r, g, b) = color(x)
+                let i = (y * W + x) * 4
+                out[i] = UInt8(r * a * 255); out[i + 1] = UInt8(g * a * 255); out[i + 2] = UInt8(b * a * 255); out[i + 3] = UInt8(a * 255)
+            }
+        }
+        guard let provider = CGDataProvider(data: Data(out) as CFData) else { return nil }
+        return CGImage(width: W, height: H, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: W * 4, space: sRGBSpace,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+    }
+}
+
 enum MaskRaster {
     static let longEdge = 1024.0
 
@@ -2200,6 +2323,13 @@ final class PreviewModel: ObservableObject {
     @Published var referencePreview: CGImage?
     @Published var navigatorPreview: CGImage?
     @Published var navigatorLabel: String?
+    /// Monitor de vídeo (forma de onda, desfile o vectorscopio) de la última vista previa.
+    @Published var scope: CGImage?
+}
+
+/// Posición de la lupa sobre la foto (0…1). Aparte para que mover el ratón solo redibuje la lupa.
+final class LoupeModel: ObservableObject {
+    @Published var point: CGPoint?
 }
 
 /// Referencia al Store que NO suscribe la vista a sus cambios (a diferencia de @EnvironmentObject):
@@ -2265,6 +2395,13 @@ final class Store: ObservableObject {
     var beforePreview: CGImage? { get { previews.beforePreview } set { previews.beforePreview = newValue } }
     @Published var clipHigh = false { didSet { scheduleRender() } }
     @Published var clipLow = false { didSet { scheduleRender() } }
+    /// Falso color de exposición (F).
+    @Published var falseColor = false { didSet { scheduleRender() } }
+    /// Lupa al 100 % bajo el cursor (L): mientras está activa se revela a resolución completa.
+    @Published var loupe = false { didSet { if !loupe { loupeModel.point = nil }; scheduleRender() } }
+    let loupeModel = LoupeModel()
+    /// Modo de evaluación de color (C): fondo gris medio y marco blanco alrededor de la foto.
+    @Published var colorAssess = false
     @Published var busy = false
     /// Comparación lado a lado: con la versión "antes" o, si `compareReference`, con otra foto de referencia.
     @Published var sideBySide = false { didSet { scheduleRender() } }
@@ -2507,11 +2644,13 @@ final class Store: ObservableObject {
         let before = beforeSettings(photo)
         let s = showBefore ? before : disabledGroups.reduce(settings) { $0.resetting($1, raw: photo.isRAW) }
         lastTarget = previewTarget
-        let maxPx: CGFloat? = zoomed ? nil : previewTarget
+        let maxPx: CGFloat? = zoomed || (loupe && tool == .none) ? nil : previewTarget
         var req = Engine.Request(url: photo.url, isRAW: photo.isRAW, settings: s, maxPixel: maxPx,
                                  cropEditing: tool == .crop, overlayMask: activeOverlay)
         req.clipHigh = clipHigh
         req.clipLow = clipLow
+        req.falseColor = falseColor
+        let scopeMode = ScopeMode(rawValue: UserDefaults.standard.integer(forKey: "scopeMode")) ?? .histogram
         req.overlayPoint = showBefore ? nil : activePointOverlay
         var beforeReq: Engine.Request?
         if sideBySideActive && compareReference, let rid = referenceID, let ref = photos.first(where: { $0.id == rid }) {
@@ -2538,11 +2677,13 @@ final class Store: ObservableObject {
             let beforeImage = beforeReq.flatMap { engine.render($0)?.image }
             let result = engine.render(req)
             let hist = result?.histogramSource.map { Histogram.compute($0) }
+            let scope = result?.histogramSource.flatMap { Scopes.compute($0, scopeMode) }
             DispatchQueue.main.async {
                 self.inFlight = false
                 if self.selectedID == id, let r = result {
                     self.preview = r.image
                     if let hist { self.histogram = hist }
+                    self.previews.scope = scope
                     if self.fullSize != r.fullSize { self.fullSize = r.fullSize }
                     if let b = beforeImage { self.beforePreview = b }
                     if let i = self.currentIndex, self.photos[i].asShot == nil, let a = r.asShot { self.photos[i].asShot = a }
@@ -2617,7 +2758,7 @@ final class Store: ObservableObject {
     }
 
     private func updateThumbnailFromPreview() {
-        guard !showBefore, tool != .crop, activeOverlay == nil, activePointOverlay == nil, !clipHigh, !clipLow, disabledGroups.isEmpty,
+        guard !showBefore, tool != .crop, activeOverlay == nil, activePointOverlay == nil, !clipHigh, !clipLow, !falseColor, disabledGroups.isEmpty,
               let cg = preview, let i = currentIndex else { return }
         thumbDirty = false
         photos[i].thumbnail = ImageUtil.downscale(cg, max: 320)
@@ -3403,6 +3544,9 @@ final class Store: ObservableObject {
         case "\\": showBefore.toggle()
         case "y": splitView.toggle(); if splitView { showBefore = false }
         case "j": let on = !(clipHigh || clipLow); clipHigh = on; clipLow = on
+        case "f": falseColor.toggle()
+        case "l": loupe.toggle()
+        case "c": colorAssess.toggle()
         case "q": toggleTool(.heal)
         case "h": if tool == .heal { showHealSpots.toggle() } else { return false }
         case "?", "/": showShortcuts.toggle()
@@ -4150,6 +4294,7 @@ struct HistogramView: View {
     @EnvironmentObject var pv: PreviewModel
     @Local private var zone: Int?
     @Local private var startValue = 0.0
+    @AppStorage("scopeMode") private var mode = 0
     private static let zones: [(String, WritableKeyPath<EditSettings, Double>, Double, ClosedRange<Double>)] = [
         ("Negros", \.blacks, 200, -100...100), ("Sombras", \.shadows, 200, -100...100), ("Exposición", \.exposure, 4, -5...5),
         ("Iluminaciones", \.highlights, 200, -100...100), ("Blancos", \.whites, 200, -100...100),
@@ -4180,13 +4325,13 @@ struct HistogramView: View {
                 .gesture(
                     DragGesture(minimumDistance: 1)
                         .onChanged { v in
-                            if zone == nil {
+                            if zone == nil && mode == 0 {
                                 let x = v.startLocation.x / g.size.width
                                 let z = x < 0.12 ? 0 : x < 0.35 ? 1 : x < 0.65 ? 2 : x < 0.88 ? 3 : 4
                                 zone = z
                                 startValue = store.settings[keyPath: Self.zones[z].1]
                             }
-                            guard let z = zone else { return }
+                            guard mode == 0, let z = zone else { return }
                             let (_, kp, k, range) = Self.zones[z]
                             var nv = startValue + Double(v.translation.width / g.size.width) * k
                             nv = z == 2 ? (nv * 100).rounded() / 100 : nv.rounded()
@@ -4198,17 +4343,81 @@ struct HistogramView: View {
                         }
                 )
             }
-            .frame(height: 96)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.separator, lineWidth: 1))
-            Text(store.current?.exif.isEmpty == false ? store.current!.exif : " ")
-                .font(.system(size: 10).monospacedDigit()).foregroundColor(Theme.dim).lineLimit(1)
-                .padding(.horizontal, 2)
+            .frame(height: mode == ScopeMode.vectorscope.rawValue ? 150 : 96)
+            .clipShape(Rectangle())
+            .overlay(Rectangle().stroke(Theme.separator, lineWidth: 1))
+            HStack(spacing: 6) {
+                Text(store.current?.exif.isEmpty == false ? store.current!.exif : " ")
+                    .font(.system(size: 10).monospacedDigit()).foregroundColor(Theme.dim).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+                HStack(spacing: 0) {
+                    ForEach([(0, "HIST", "Histograma"), (1, "ONDA", "Forma de onda (luminancia)"), (2, "RGB", "Desfile RGB"),
+                             (3, "VECT", "Vectorscopio")], id: \.0) { m, label, help in
+                        Text(label).font(.system(size: 8.5, weight: m == mode ? .bold : .medium, design: .monospaced))
+                            .foregroundColor(m == mode ? Theme.onSelect : Theme.secondary)
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(m == mode ? Theme.select : Color.clear)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                mode = m
+                                store.scheduleRender()
+                            }
+                            .help(tr(help))
+                    }
+                }
+                .overlay(Rectangle().stroke(Theme.border, lineWidth: 1))
+            }
+            .padding(.horizontal, 2)
         }
         .padding(.horizontal, 12)
         .padding(.top, 12)
         .padding(.bottom, 9)
         .help("Arrastra sobre el histograma para ajustar negros, sombras, exposición, iluminaciones o blancos")
+    }
+
+    /// Monitor de vídeo con su retícula.
+    private func drawScope(_ ctx: GraphicsContext, _ size: CGSize) {
+        let lineColor = GraphicsContext.Shading.color(.white.opacity(0.09))
+        let labelFont = Font.system(size: 8, design: .monospaced)
+        if mode == ScopeMode.vectorscope.rawValue {
+            let side = min(size.width, size.height) - 8
+            let box = CGRect(x: (size.width - side) / 2, y: (size.height - side) / 2, width: side, height: side)
+            let c = CGPoint(x: box.midX, y: box.midY)
+            func at(_ r: Double, _ g: Double, _ b: Double) -> CGPoint {
+                let (cb, cr) = Scopes.chroma(r, g, b)
+                return CGPoint(x: c.x + CGFloat(cb) * side * 0.9, y: c.y - CGFloat(cr) * side * 0.9)
+            }
+            ctx.stroke(Path(ellipseIn: box.insetBy(dx: side * 0.05, dy: side * 0.05)), with: lineColor)
+            ctx.stroke(Path { p in
+                p.move(to: CGPoint(x: box.minX, y: c.y)); p.addLine(to: CGPoint(x: box.maxX, y: c.y))
+                p.move(to: CGPoint(x: c.x, y: box.minY)); p.addLine(to: CGPoint(x: c.x, y: box.maxY))
+            }, with: lineColor)
+            // Línea de tonos piel
+            let skin = at(0.87, 0.65, 0.53)
+            let dx = skin.x - c.x, dy = skin.y - c.y, len = max(0.001, hypot(dx, dy))
+            ctx.stroke(Path { p in p.move(to: c); p.addLine(to: CGPoint(x: c.x + dx / len * side * 0.45, y: c.y + dy / len * side * 0.45)) },
+                       with: .color(Theme.select.opacity(0.35)), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+            if let cg = pv.scope { ctx.draw(Image(decorative: cg, scale: 1), in: box) }
+            // Dianas de los colores al 75 %
+            for (label, r, g, b) in [("R", 0.75, 0.0, 0.0), ("Y", 0.75, 0.75, 0.0), ("G", 0.0, 0.75, 0.0),
+                                     ("C", 0.0, 0.75, 0.75), ("B", 0.0, 0.0, 0.75), ("M", 0.75, 0.0, 0.75)] {
+                let pt = at(r, g, b)
+                ctx.stroke(Path(CGRect(x: pt.x - 3.5, y: pt.y - 3.5, width: 7, height: 7)), with: .color(.white.opacity(0.35)))
+                ctx.draw(Text(label).font(labelFont).foregroundColor(Theme.dim),
+                         at: CGPoint(x: c.x + (pt.x - c.x) * 1.18, y: c.y + (pt.y - c.y) * 1.18))
+            }
+            return
+        }
+        for q in 0...4 {
+            let y = 4 + (size.height - 8) * (1 - CGFloat(q) / 4)
+            ctx.stroke(Path { p in p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: size.width, y: y)) }, with: lineColor)
+        }
+        let plot = CGRect(x: 0, y: 4, width: size.width, height: size.height - 8)
+        if let cg = pv.scope { ctx.draw(Image(decorative: cg, scale: 1), in: plot) }
+        for (q, label) in [(0, "0"), (2, "50"), (4, "100")] {
+            let y = 4 + (size.height - 8) * (1 - CGFloat(q) / 4)
+            ctx.draw(Text(label).font(labelFont).foregroundColor(Theme.dim), at: CGPoint(x: 4, y: y), anchor: q == 4 ? .topLeading : .bottomLeading)
+        }
     }
 
     private func clipButton(low: Bool) -> some View {
@@ -4238,6 +4447,10 @@ struct HistogramView: View {
             let x = CGFloat(q) / 4 * size.width
             ctx.stroke(Path { p in p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: size.height)) },
                        with: .color(.white.opacity(0.05)))
+        }
+        if mode != 0 {
+            drawScope(ctx, size)
+            return
         }
         guard let h = pv.histogram else { return }
         var c = ctx
@@ -5930,6 +6143,62 @@ struct HistoryList: View, Equatable {
     }
 }
 
+/// Lupa al 100 % que sigue al cursor (mientras está activa, la foto se revela a resolución completa).
+struct LoupeView: View {
+    let image: CGImage
+    @ObservedObject var loupe: LoupeModel
+    let scale: CGFloat
+    private let side: CGFloat = 220
+
+    var body: some View {
+        GeometryReader { g in
+            if let p = loupe.point {
+                // Tamaño en puntos de la foto a 100 % (un píxel de la imagen por píxel de pantalla)
+                let w = CGFloat(image.width) / scale, h = CGFloat(image.height) / scale
+                let cur = CGPoint(x: p.x * g.size.width, y: p.y * g.size.height)
+                let cx = cur.x + side + 24 > g.size.width ? cur.x - side / 2 - 18 : cur.x + side / 2 + 18
+                let cy = min(max(cur.y, side / 2), max(side / 2, g.size.height - side / 2))
+                ZStack {
+                    Image(decorative: image, scale: 1).resizable().interpolation(.none)
+                        .frame(width: w, height: h)
+                        .offset(x: (0.5 - p.x) * w, y: (0.5 - p.y) * h)
+                    Rectangle().fill(Color.white.opacity(0.55)).frame(width: 1, height: 14)
+                    Rectangle().fill(Color.white.opacity(0.55)).frame(width: 14, height: 1)
+                }
+                .frame(width: side, height: side)
+                .clipped()
+                .background(Theme.canvas)
+                .overlay(Rectangle().stroke(Theme.select, lineWidth: 1))
+                .overlay(Text("100 %").font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundColor(Theme.onSelect).padding(.horizontal, 4).padding(.vertical, 1)
+                    .background(Theme.select), alignment: .topLeading)
+                .shadow(color: .black.opacity(0.6), radius: 10, y: 3)
+                .position(x: cx, y: cy)
+            }
+        }
+    }
+}
+
+/// Leyenda del falso color de exposición.
+struct FalseColorLegend: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            ForEach(LUTBuilder.falseColorZones, id: \.label) { z in
+                HStack(spacing: 4) {
+                    Rectangle().fill(Color(red: Double(z.color.0), green: Double(z.color.1), blue: Double(z.color.2)))
+                        .frame(width: 9, height: 9)
+                    Text(tr(z.label)).font(.system(size: 9.5, weight: .medium)).foregroundColor(Theme.text)
+                    Text("\(Int(z.lo * 100))–\(min(100, Int((z.hi * 100).rounded())))").font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(Theme.dim)
+                }
+            }
+        }
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .background(Rectangle().fill(Color.black.opacity(0.75)))
+        .overlay(Rectangle().stroke(Theme.border, lineWidth: 1))
+    }
+}
+
 /// Miniatura del Navegador: marca la zona ampliada; clic o arrastre para desplazarse por la foto.
 struct NavigatorImage: View {
     @EnvironmentObject var store: Store
@@ -5998,6 +6267,13 @@ struct ImageOverlay: View {
                     .onTapGesture { loc in
                         store.endEditing()
                         store.zoom(to: max(1, store.fitLevel * 2), at: CGPoint(x: loc.x / g.size.width, y: loc.y / g.size.height))
+                    }
+                    .onContinuousHover { phase in
+                        guard store.loupe else { return }
+                        switch phase {
+                        case .active(let p): store.loupeModel.point = CGPoint(x: p.x / g.size.width, y: p.y / g.size.height)
+                        case .ended: store.loupeModel.point = nil
+                        }
                     }
             }
         }
@@ -6187,7 +6463,7 @@ struct CanvasView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                Theme.canvas
+                store.colorAssess ? Color(white: 0.46) : Theme.canvas
                 if store.current?.missing != true, let cg = pv.preview ?? store.current?.thumbnail {
                     if store.zoomed && store.tool == .none {
                         ZoomedImage(image: cg)
@@ -6204,8 +6480,16 @@ struct CanvasView: View {
                         SplitCompare(after: cg, before: before).padding(28)
                     } else {
                         PhotoImage(image: cg)
-                            .background(Color.black.shadow(color: .black.opacity(0.55), radius: 18, y: 4))
                             .overlay(ImageOverlay())
+                            .overlay {
+                                if store.loupe && store.tool == .none {
+                                    LoupeView(image: cg, loupe: store.loupeModel, scale: store.backingScale).allowsHitTesting(false)
+                                }
+                            }
+                            // Evaluación de color: marco blanco (y fondo gris medio) para juzgar el color sin el negro alrededor
+                            .padding(store.colorAssess ? 14 : 0)
+                            .background((store.colorAssess ? Color.white : Color.black)
+                                .shadow(color: .black.opacity(store.colorAssess ? 0.15 : 0.55), radius: 18, y: 4))
                             .padding(store.tool == .crop ? 40 : 28)
                     }
                 } else if let p = store.current, p.missing {
@@ -6232,6 +6516,7 @@ struct CanvasView: View {
                         }
                     }
                     Spacer()
+                    if store.falseColor { FalseColorLegend().frame(maxWidth: .infinity, alignment: .leading) }
                     if let st = store.status {
                         Toast(text: st).transition(.move(edge: .bottom).combined(with: .opacity))
                     }
@@ -6254,6 +6539,9 @@ struct CanvasView: View {
         if store.activePointOverlay != nil { b.append("Rango del punto de color") }
         if store.zoomed && store.tool == .none { b.append("\(store.zoomPercent) %") }
         if !store.disabledGroups.isEmpty { b.append("Paneles desactivados: vista previa parcial") }
+        if store.falseColor { b.append("Falso color") }
+        if store.loupe && store.tool == .none { b.append("Lupa 100 %") }
+        if store.colorAssess { b.append("Evaluación de color") }
         if store.clipHigh || store.clipLow { b.append("Aviso de recorte") }
         switch store.tool {
         case .whiteBalance: b.append("Haz clic en una zona neutra (gris o blanca)")
@@ -6520,6 +6808,16 @@ struct BottomBar: View {
                     store.clipHigh = on
                     store.clipLow = on
                 }
+                IconButton(icon: "thermometer.medium", help: "Falso color de exposición (F)", active: store.falseColor, size: 11) {
+                    store.falseColor.toggle()
+                }
+                IconButton(icon: "magnifyingglass", help: "Lupa al 100 % bajo el cursor (L)", active: store.loupe, size: 11) {
+                    store.loupe.toggle()
+                }
+                IconButton(icon: "circle.lefthalf.filled", help: "Evaluación de color: fondo gris y marco blanco (C)",
+                           active: store.colorAssess, size: 11) {
+                    store.colorAssess.toggle()
+                }
             }
             Spacer()
             if let p = store.current, let i = store.currentIndex {
@@ -6564,7 +6862,7 @@ struct ShortcutsSheet: View {
         ("Herramientas", [("R", "Recortar y enderezar"), ("Q", "Eliminar manchas"), ("M", "Máscaras"), ("W", "Balance de blancos"),
                           ("O", "Superposición de máscara"), ("H", "Mostrar puntos de corrección"), ("X", "Orientación del recorte"),
                           ("↩ / Esc", "Cerrar herramienta"), ("⌫", "Borrar máscara o corrección")]),
-        ("Vista", [("Z / espacio", "Zoom 1:1"), ("\\", "Antes"), ("Y", "Antes / después dividido"), ("J", "Aviso de recorte"),
+        ("Vista", [("Z / espacio", "Zoom 1:1"), ("\\", "Antes"), ("Y", "Antes / después dividido"), ("J", "Aviso de recorte"), ("F", "Falso color"), ("L", "Lupa"), ("C", "Evaluación de color"),
                    ("Tab", "Ocultar paneles"), ("G / D", "Biblioteca / Revelar"), ("← →", "Foto anterior / siguiente"),
                    ("⌘ / ⇧ + clic", "Marcar varias fotos")]),
         ("Edición", [("⌘Z / ⇧⌘Z", "Deshacer / rehacer"), ("⇧⌘C / ⇧⌘V", "Copiar / pegar ajustes"), ("⌥⌘V", "Ajustes anteriores"),
@@ -6755,6 +7053,9 @@ struct RevelaApp: App {
                 Button("Enderezar automáticamente") { store.autoStraighten() }.disabled(store.current == nil)
                 Button("Antes  (\\)") { store.showBefore.toggle() }
                 Button("Antes / después dividido  (Y)") { store.splitView.toggle() }
+                Button("Falso color  (F)") { store.falseColor.toggle() }
+                Button("Lupa  (L)") { store.loupe.toggle() }
+                Button("Evaluación de color  (C)") { store.colorAssess.toggle() }
                 Button("Aviso de recorte  (J)") { let on = !(store.clipHigh || store.clipLow); store.clipHigh = on; store.clipLow = on }
                 Button("Ocultar paneles  (Tab)") { withAnimation { store.panelsHidden.toggle() } }
                 Button("Acercar") { store.zoomStep(1) }.keyboardShortcut("=", modifiers: [.command])

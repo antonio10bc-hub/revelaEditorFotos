@@ -157,6 +157,14 @@ EN = {
     "Restablecer un deslizador": "Reset a slider", "Z / espacio": "Z / space", "⌥ + arrastrar": "⌥ + drag",
     "⇧⌘I  ·  o arrástralas a la ventana": "⇧⌘I  ·  or drag them into the window", "⌘ / ⇧ + clic": "⌘ / ⇧ + click",
     "Hecho": "Done", "Manchas": "Spots", "Orientación": "Orientation",
+    # Monitores, falso color, lupa y evaluación de color
+    "Histograma": "Histogram", "Forma de onda (luminancia)": "Waveform (luminance)", "Desfile RGB": "RGB parade",
+    "Vectorscopio": "Vectorscope", "Falso color": "False color", "Falso color  (F)": "False color  (F)",
+    "Falso color de exposición (F)": "Exposure false color (F)", "Negro": "Black", "Muy oscuro": "Very dark",
+    "Gris medio": "Middle gray", "Piel +1": "Skin +1", "Casi blanco": "Near white", "Quemado": "Clipped",
+    "Lupa": "Loupe", "Lupa  (L)": "Loupe  (L)", "Lupa 100 %": "Loupe 100 %", "Lupa al 100 % bajo el cursor (L)": "100 % loupe under the cursor (L)",
+    "Evaluación de color": "Color assessment", "Evaluación de color  (C)": "Color assessment  (C)",
+    "Evaluación de color: fondo gris y marco blanco (C)": "Color assessment: gray background and white frame (C)",
     # Paneles: restablecer, ojo, modo solo
     "Doble clic para restablecer %@": "Double-click to reset %@",
     "Doble clic para restablecer · ⌥ + arrastrar para ajuste fino": "Double-click to reset · ⌥ + drag for fine adjustment",
