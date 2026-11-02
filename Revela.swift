@@ -4107,6 +4107,16 @@ struct LRSliderRow: View, Equatable {
                 }
                 .help("Doble clic para restablecer · ⌥ + arrastrar para ajuste fino")
             SliderTrack(value: $value, range: range, step: step, defaultValue: defaultValue, track: track, onCommit: commit)
+                // La rueda y ↑↓ solo ajustan el deslizador con el cursor sobre la barra, no sobre el nombre ni el valor
+                .onHover { h in
+                    if h {
+                        let b = $value
+                        store?.setHoverSlider(Store.HoverSlider(id: token, get: { b.wrappedValue }, set: { b.wrappedValue = $0 },
+                                                               range: range, step: step, commit: commit))
+                    } else if store?.hoverSlider?.id == token {
+                        store?.setHoverSlider(nil)
+                    }
+                }
             ValueField(value: $value, range: range, decimals: decimals, signed: range.lowerBound < 0, isDefault: isDefault,
                        display: display, onCommit: commit)
                 .frame(width: 42)
@@ -4114,16 +4124,7 @@ struct LRSliderRow: View, Equatable {
         }
         .frame(height: 19)
         .overlay(Rectangle().fill(Theme.rule).frame(height: 1), alignment: .top)
-        .onHover { h in
-            withAnimation(.easeOut(duration: 0.1)) { hover = h }
-            if h {
-                let b = $value
-                store?.setHoverSlider(Store.HoverSlider(id: token, get: { b.wrappedValue }, set: { b.wrappedValue = $0 },
-                                                       range: range, step: step, commit: commit))
-            } else if store?.hoverSlider?.id == token {
-                store?.setHoverSlider(nil)
-            }
-        }
+        .onHover { h in withAnimation(.easeOut(duration: 0.1)) { hover = h } }
     }
 
     static func == (a: LRSliderRow, b: LRSliderRow) -> Bool {
